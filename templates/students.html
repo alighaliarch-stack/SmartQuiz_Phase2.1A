@@ -1,0 +1,96 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Students · {{ app_name }}{% endblock %}
+{% block page_title %}Students{% endblock %}
+
+{% block content %}
+
+  {% if success_message %}
+  <div class="alert alert-success d-flex align-items-center gap-2 mb-4" role="alert"
+       style="background: rgba(63, 163, 77,0.14); border: 1px solid rgba(63, 163, 77,0.4); color: var(--sq-mint); border-radius: 12px;">
+    <i class="bi bi-check-circle-fill"></i>
+    <span>{{ success_message }}</span>
+  </div>
+  {% endif %}
+
+  <div class="mb-4">
+    <h1 class="h3 mb-1">Students</h1>
+    <p class="sq-note mb-0">Everyone who has joined a quiz, across all quizzes.</p>
+  </div>
+
+  <!-- ============================= STAT CARDS ============================= -->
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-lg-3">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-broadcast"></i></div>
+        <div class="val">{{ connected_count }}</div>
+        <div class="lbl">Connected Students</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-3">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-people-fill"></i></div>
+        <div class="val">{{ students|length }}</div>
+        <div class="lbl">Joined Students</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =============================== ATTENDANCE ============================== -->
+  <div class="sq-card p-3 p-md-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h5 mb-0">Attendance</h2>
+      <a href="/admin" class="btn btn-sq btn-sq-outline btn-sm">
+        <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+      </a>
+    </div>
+
+    {% if students %}
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Roll Number</th>
+            <th>Course</th>
+            <th>Section</th>
+            <th>Quiz</th>
+            <th>Connected</th>
+            <th>Status</th>
+            <th class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for student in students %}
+          <tr>
+            <td class="fw-semibold">{{ student.name }}</td>
+            <td>{{ student.roll_number }}</td>
+            <td>{{ student.course or "—" }}</td>
+            <td>{{ student.section or "—" }}</td>
+            <td><a href="/admin/quizzes/{{ student.quiz.id }}" style="color: var(--sq-text-dim);">{{ student.quiz.title }}</a></td>
+            <td class="sq-note">{{ student.connected_at.strftime('%b %d, %H:%M') }}</td>
+            <td>
+              <span class="badge-status {{ 'badge-active' if student.status == 'Ready' else ('badge-completed' if student.status == 'Finished' else 'badge-draft') }}">
+                {{ student.status }}
+              </span>
+            </td>
+            <td class="text-end">
+              <form action="/admin/students/{{ student.id }}/remove" method="post" class="d-inline"
+                    onsubmit="return confirm('Remove {{ student.name }} from this quiz?');">
+                <button type="submit" class="btn-sq-icon danger" title="Remove"><i class="bi bi-person-dash"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+      <div class="icon-badge mx-auto mb-3" style="width:52px;height:52px;font-size:1.3rem;"><i class="bi bi-people"></i></div>
+      <h3 class="h6 mb-1">No students yet</h3>
+      <p class="sq-note mb-0">Once students join a published quiz at <code>/join</code>, they'll show up here.</p>
+    </div>
+    {% endif %}
+  </div>
+
+{% endblock %}

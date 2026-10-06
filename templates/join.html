@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Join Quiz · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <header class="sq-hero sq-hero-compact container">
+    <div class="sq-eyebrow sq-animate">
+      <i class="bi bi-phone"></i> For students
+    </div>
+
+    <div class="sq-card sq-placeholder-panel sq-animate delay-1">
+      <div class="icon-badge mx-auto"><i class="bi bi-phone"></i></div>
+      <h1 style="font-size: clamp(1.8rem, 4vw, 2.4rem);">Join a Quiz</h1>
+
+      {% if active_quiz %}
+        <p class="lead-sub mb-4">Joining: <strong style="color: var(--sq-text);">{{ active_quiz.title }}</strong></p>
+
+        <form method="post" action="/join" class="text-start">
+          <input type="hidden" name="quiz_id" value="{{ active_quiz.id }}">
+          <div class="mb-3">
+            <label for="student-name" class="form-label" style="color: var(--sq-text-dim); font-weight:600; font-size:0.85rem;">Student Name</label>
+            <input type="text" class="form-control" id="student-name" name="name" placeholder="e.g. Anaya Sharma" required
+                   style="background: rgba(255,255,255,0.06); border: 1px solid var(--sq-glass-border); color: var(--sq-text); border-radius: 12px; padding: 0.7rem 0.9rem;">
+          </div>
+          <div class="mb-3">
+            <label for="roll-number" class="form-label" style="color: var(--sq-text-dim); font-weight:600; font-size:0.85rem;">Roll Number</label>
+            <input type="text" class="form-control" id="roll-number" name="roll_number" placeholder="e.g. CS21B045" required
+                   style="background: rgba(255,255,255,0.06); border: 1px solid var(--sq-glass-border); color: var(--sq-text); border-radius: 12px; padding: 0.7rem 0.9rem;">
+          </div>
+          <div class="row g-3 mb-4">
+            <div class="col-12 col-sm-6">
+              <label for="course" class="form-label" style="color: var(--sq-text-dim); font-weight:600; font-size:0.85rem;">Course</label>
+              <input type="text" class="form-control" id="course" name="course" placeholder="e.g. B.Tech CSE"
+                     style="background: rgba(255,255,255,0.06); border: 1px solid var(--sq-glass-border); color: var(--sq-text); border-radius: 12px; padding: 0.7rem 0.9rem;">
+            </div>
+            <div class="col-12 col-sm-6">
+              <label for="section" class="form-label" style="color: var(--sq-text-dim); font-weight:600; font-size:0.85rem;">Section</label>
+              <input type="text" class="form-control" id="section" name="section" placeholder="e.g. A"
+                     style="background: rgba(255,255,255,0.06); border: 1px solid var(--sq-glass-border); color: var(--sq-text); border-radius: 12px; padding: 0.7rem 0.9rem;">
+            </div>
+          </div>
+
+          <div class="d-flex flex-column flex-sm-row gap-2">
+            <button type="submit" class="btn btn-sq btn-sq-primary flex-fill">
+              <i class="bi bi-box-arrow-in-right me-2"></i>Join Quiz
+            </button>
+            <a href="#" class="btn btn-sq btn-sq-outline flex-fill" title="Camera QR scanning isn't implemented yet">
+              <i class="bi bi-qr-code-scan me-2"></i>Scan QR
+            </a>
+          </div>
+        </form>
+      {% else %}
+        {% if invalid_code %}
+        <p class="lead-sub">The code <strong style="color: var(--sq-text);">{{ invalid_code.upper() }}</strong> isn't active.</p>
+        <p style="color: var(--sq-text-dim); font-size: 0.9rem;">This session may have ended, or the code was mistyped. Ask your instructor for the current code.</p>
+        {% else %}
+        <p class="lead-sub">No quiz is open right now.</p>
+        <p style="color: var(--sq-text-dim); font-size: 0.9rem;">Ask your instructor to start a session, then refresh this page.</p>
+        {% endif %}
+        <a href="/join" class="btn btn-sq btn-sq-outline mt-2">
+          <i class="bi bi-arrow-clockwise me-2"></i>Refresh
+        </a>
+      {% endif %}
+    </div>
+  </header>
+{% endblock %}

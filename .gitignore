@@ -1,0 +1,31 @@
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Runtime and development artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.tmp
+*.temp
+*.bak
+test-results/
+playwright-report/
+blob-report/
+scratch/
+tmp/
+temp/
+browser-profile/
+
+# SmartQuiz runtime data
+static/uploads/*
+!static/uploads/.gitkeep

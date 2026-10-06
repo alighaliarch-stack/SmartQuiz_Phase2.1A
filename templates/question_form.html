@@ -1,0 +1,165 @@
+{% extends "dashboard_base.html" %}
+{% block title %}{{ "Edit Question" if mode == "edit" else "Add Question" }} · {{ quiz.title }}{% endblock %}
+{% block page_title %}{{ "Edit Question" if mode == "edit" else "Add Question" }}{% endblock %}
+
+{% block content %}
+
+  <div class="d-flex align-items-center gap-2 mb-4">
+    <a href="/admin/quizzes/{{ quiz.id }}" class="btn-sq-icon" title="Back to Question Builder"><i class="bi bi-arrow-left"></i></a>
+    <div>
+      <h1 class="h3 mb-1">{{ "Edit Question" if mode == "edit" else "Add Question" }}</h1>
+      <p class="sq-note mb-0">For quiz: <strong style="color:var(--sq-text-dim)">{{ quiz.title }}</strong></p>
+    </div>
+  </div>
+
+  <div class="row justify-content-center">
+    <div class="col-12 col-lg-9">
+
+      {% if error_message %}
+      <div class="d-flex align-items-center gap-2 mb-4" role="alert"
+           style="background: rgba(229,52,42,0.14); border: 1px solid rgba(229,52,42,0.4); color: var(--sq-rose-hi); border-radius: 12px; padding: 12px 16px;">
+        <i class="bi bi-exclamation-circle-fill"></i>
+        <span>{{ error_message }}</span>
+      </div>
+      {% endif %}
+
+      <div class="sq-card p-4 p-md-5">
+        <form method="post" action="{{ form_action }}" enctype="multipart/form-data">
+
+          <div class="mb-3">
+            <label for="question-text" class="form-label">Question Text</label>
+            <textarea class="form-control" id="question-text" name="question_text" rows="2" required
+                      placeholder="e.g. What is the capital of France?">{{ question.question_text if question else "" }}</textarea>
+          </div>
+
+          <div class="row g-3 mb-3">
+            <div class="col-12 col-sm-3">
+              <label for="points" class="form-label">Points</label>
+              <input type="number" class="form-control" id="points" name="points" min="1"
+                     value="{{ question.points if question else 1 }}">
+            </div>
+            <div class="col-12 col-sm-4">
+              <label for="duration-seconds" class="form-label">Time Limit</label>
+              {% set current_duration = prefill.duration_seconds %}
+              {% set presets = [15, 20, 30, 45, 60, 90, 120, 180, 300, 600, 900, 1200] %}
+              <select class="form-select" id="duration-seconds" name="duration_seconds">
+                {% if current_duration not in presets %}
+                <option value="{{ current_duration }}" selected>{{ current_duration }} sec (current)</option>
+                {% endif %}
+                {% for s in presets %}
+                <option value="{{ s }}" {% if s == current_duration %}selected{% endif %}>
+                  {{ "%d min"|format(s // 60) if s % 60 == 0 and s >= 60 else "%d sec"|format(s) }}
+                </option>
+                {% endfor %}
+              </select>
+              <p class="sq-note mt-1 mb-0" style="font-size: 0.76rem;">15 sec – 20 min. Each question keeps its own countdown.</p>
+            </div>
+            <div class="col-12 col-sm-5">
+              <label for="question-type" class="form-label">Question Type</label>
+              <select class="form-select" id="question-type" name="question_type">
+                {% for value, label in question_types.items() %}
+                <option value="{{ value }}" {% if (question.question_type if question else "mcq_single") == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <div class="mb-4">
+            <label for="image" class="form-label">Optional Image</label>
+            <input type="file" class="form-control" id="image" name="image" accept="image/*">
+            {% if question and question.image_path %}
+            <div class="d-flex align-items-center gap-2 mt-2">
+              <img src="{{ question.image_path }}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--sq-glass-border);">
+              <span class="sq-note">Current image — uploading a new one will replace it.</span>
+            </div>
+            {% endif %}
+          </div>
+
+          <!-- ========================= MCQ OPTIONS BLOCK ========================= -->
+          <div id="block-mcq" data-types="mcq_single mcq_multiple" class="mb-4 d-none">
+            <label class="form-label mb-2">Options — mark the correct answer{{ "(s)" }}</label>
+            {% set letters = ["A", "B", "C", "D"] %}
+            {% set values = {"A": prefill.option_a, "B": prefill.option_b, "C": prefill.option_c, "D": prefill.option_d} %}
+            {% for letter in letters %}
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <input type="radio" name="correct_single" value="{{ letter }}" class="opt-single-control" style="width:18px;height:18px;accent-color:var(--sq-mint);"
+                     {% if prefill.correct_single == letter %}checked{% endif %}>
+              <input type="checkbox" name="option_{{ letter|lower }}_correct" value="true" class="opt-multi-control d-none" style="width:18px;height:18px;accent-color:var(--sq-mint);"
+                     {% if prefill.correct_flags[letter] %}checked{% endif %}>
+              <span class="fw-semibold" style="width:20px;">{{ letter }}</span>
+              <input type="text" class="form-control" name="option_{{ letter|lower }}" placeholder="Option {{ letter }}" value="{{ values[letter] }}">
+            </div>
+            {% endfor %}
+          </div>
+
+          <!-- ========================= TRUE/FALSE BLOCK ========================= -->
+          <div id="block-tf" data-types="true_false" class="mb-4 d-none">
+            <label class="form-label mb-2">Correct Answer</label>
+            <div class="d-flex gap-4">
+              <label class="d-flex align-items-center gap-2">
+                <input type="radio" name="correct_true_false" value="True" style="width:18px;height:18px;accent-color:var(--sq-mint);"
+                       {% if prefill.correct_true_false == "True" %}checked{% endif %}>
+                True
+              </label>
+              <label class="d-flex align-items-center gap-2">
+                <input type="radio" name="correct_true_false" value="False" style="width:18px;height:18px;accent-color:var(--sq-mint);"
+                       {% if prefill.correct_true_false == "False" %}checked{% endif %}>
+                False
+              </label>
+            </div>
+          </div>
+
+          <!-- ========================= SHORT ANSWER BLOCK ========================= -->
+          <div id="block-short" data-types="short_answer" class="mb-4 d-none">
+            <label for="accepted-answers" class="form-label">Accepted Answers</label>
+            <textarea class="form-control" id="accepted-answers" name="accepted_answers" rows="3"
+                      placeholder="One accepted answer per line, e.g.&#10;To identify an organization's strengths, weaknesses, opportunities and threats.&#10;SWOT analysis identifies strengths, weaknesses, opportunities and threats">{{ prefill.accepted_answers }}</textarea>
+            <p class="sq-note mt-2 mb-0">Put the expected answer on the first line. Add alternative acceptable phrasings on their own lines below it — full sentences with normal punctuation are fine. Students don't need to match this wording exactly: paraphrases, synonyms, and reordered sentences are evaluated automatically as long as the core meaning matches; genuinely ambiguous answers are flagged for your review.</p>
+
+            <label for="grading-notes" class="form-label mt-3">Grading Guidance <span class="sq-note" style="font-weight: 400;">(optional)</span></label>
+            <textarea class="form-control" id="grading-notes" name="grading_notes" rows="2"
+                      placeholder="Optional — anything that should steer grading, e.g. required points, acceptable synonyms, or common wrong answers to watch for.">{{ prefill.grading_notes }}</textarea>
+            <p class="sq-note mt-2 mb-0">Free text is fine — this is only used for answers that need closer semantic evaluation. Leave it blank and grading still works normally.</p>
+          </div>
+
+          <div class="d-flex flex-column flex-sm-row gap-2 mt-2">
+            <button type="submit" class="btn btn-sq btn-sq-primary btn-sq-lg">
+              <i class="bi bi-save2 me-2"></i>Save Question
+            </button>
+            <a href="/admin/quizzes/{{ quiz.id }}" class="btn btn-sq btn-sq-outline btn-sq-lg">Cancel</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    var typeSelect = document.getElementById('question-type');
+    var blocks = document.querySelectorAll('[data-types]');
+
+    function syncVisibility() {
+      var type = typeSelect.value;
+      blocks.forEach(function (block) {
+        var types = block.getAttribute('data-types').split(' ');
+        block.classList.toggle('d-none', types.indexOf(type) === -1);
+      });
+
+      // Within the MCQ block, swap radio (single-correct) vs checkboxes (multi-correct)
+      var isMultiple = type === 'mcq_multiple';
+      document.querySelectorAll('.opt-single-control').forEach(function (el) {
+        el.classList.toggle('d-none', isMultiple);
+      });
+      document.querySelectorAll('.opt-multi-control').forEach(function (el) {
+        el.classList.toggle('d-none', !isMultiple);
+      });
+    }
+
+    typeSelect.addEventListener('change', syncVisibility);
+    syncVisibility();
+  })();
+</script>
+{% endblock %}

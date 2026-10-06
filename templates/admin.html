@@ -1,0 +1,118 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Dashboard · {{ app_name }}{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+
+  {% if success_message %}
+  <div class="alert alert-success d-flex align-items-center gap-2 mb-4" role="alert"
+       style="background: rgba(63, 163, 77,0.14); border: 1px solid rgba(63, 163, 77,0.4); color: var(--sq-mint); border-radius: 12px;">
+    <i class="bi bi-check-circle-fill"></i>
+    <span>{{ success_message }}</span>
+  </div>
+  {% endif %}
+
+  <!-- ============================ PAGE HEADER ============================ -->
+  <div class="d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-3 mb-4">
+    <div>
+      <h1 class="h3 mb-1">Welcome back 👋</h1>
+      <p class="sq-note mb-0">Here's what's happening with your quizzes.</p>
+    </div>
+    <a href="/admin/quizzes/new" class="btn btn-sq btn-sq-primary btn-sq-lg">
+      <i class="bi bi-plus-lg me-2"></i>Create Quiz
+    </a>
+  </div>
+
+  <!-- ============================= STAT CARDS ============================= -->
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-lg-3">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-patch-question-fill"></i></div>
+        <div class="val">{{ total_quizzes }}</div>
+        <div class="lbl">Total Quizzes</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-3">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-people-fill"></i></div>
+        <div class="val">{{ connected_students }}</div>
+        <div class="lbl">Students Connected</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-3">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-broadcast"></i></div>
+        <div class="val">{{ active_quiz_count }}</div>
+        <div class="lbl">Active Quiz</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-3">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-check2-circle"></i></div>
+        <div class="val">{{ completed_quizzes }}</div>
+        <div class="lbl">Completed Quizzes</div>
+      </div>
+    </div>
+  </div>
+  <p class="sq-note mb-4"><i class="bi bi-info-circle me-1"></i>All four counts above are live from the database.</p>
+
+  <!-- =========================== RECENT QUIZZES =========================== -->
+  <div class="sq-card p-3 p-md-4" id="recent-quizzes">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h5 mb-0">Recent Quizzes</h2>
+      <a href="/admin/quizzes/new" class="btn btn-sq btn-sq-outline btn-sm">
+        <i class="bi bi-plus-lg me-1"></i>New
+      </a>
+    </div>
+
+    {% if quizzes %}
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th>Quiz Name</th>
+            <th>Questions</th>
+            <th>Status</th>
+            <th>Created Date</th>
+            <th class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for quiz in quizzes %}
+          <tr>
+            <td class="fw-semibold">
+              <a href="/admin/quizzes/{{ quiz.id }}" style="color: var(--sq-text);">{{ quiz.title }}</a>
+            </td>
+            <td>{{ quiz.questions|length }}</td>
+            <td>
+              <span class="badge-status {{ status_badge_class.get(quiz.status, 'badge-draft') }}">
+                {{ quiz.status }}
+              </span>
+            </td>
+            <td>{{ quiz.created_at.strftime('%b %d, %Y') }}</td>
+            <td class="text-end">
+              <a href="/admin/quizzes/{{ quiz.id }}" class="btn-sq-icon" title="View"><i class="bi bi-eye"></i></a>
+              <a href="/admin/quizzes/{{ quiz.id }}/edit" class="btn-sq-icon" title="Edit"><i class="bi bi-pencil"></i></a>
+              <form action="/admin/quizzes/{{ quiz.id }}/delete" method="post" class="d-inline"
+                    onsubmit="return confirm('Delete &quot;{{ quiz.title }}&quot;? This cannot be undone.');">
+                <button type="submit" class="btn-sq-icon danger" title="Delete"><i class="bi bi-trash3"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+      <div class="icon-badge mx-auto mb-3" style="width:52px;height:52px;font-size:1.3rem;"><i class="bi bi-patch-question"></i></div>
+      <h3 class="h6 mb-1">No quizzes yet</h3>
+      <p class="sq-note mb-3">Create your first quiz to see it here.</p>
+      <a href="/admin/quizzes/new" class="btn btn-sq btn-sq-primary btn-sm">
+        <i class="bi bi-plus-lg me-1"></i>Create Quiz
+      </a>
+    </div>
+    {% endif %}
+  </div>
+
+{% endblock %}

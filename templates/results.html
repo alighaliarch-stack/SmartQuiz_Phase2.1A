@@ -1,0 +1,319 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Results · {{ app_name }}{% endblock %}
+{% block page_title %}Results{% endblock %}
+
+{% block content %}
+
+  <div class="mb-4">
+    <h1 class="h3 mb-1">Results</h1>
+    <p class="sq-note mb-0">Live from submitted answers — updates automatically every 2 seconds.</p>
+  </div>
+
+  <!-- ============================= STAT CARDS ============================= -->
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-lg-4">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-people-fill"></i></div>
+        <div class="val" id="stat-total-students">{{ total_students }}</div>
+        <div class="lbl">Total Students</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-4">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-send-check-fill"></i></div>
+        <div class="val" id="stat-submitted-answers">{{ submitted_answers }}</div>
+        <div class="lbl">Submitted Answers</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-4">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-check-circle-fill"></i></div>
+        <div class="val" id="stat-correct-answers">{{ correct_answers }}</div>
+        <div class="lbl">Correct Answers</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-4">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-x-circle-fill"></i></div>
+        <div class="val" id="stat-incorrect-answers">{{ incorrect_answers }}</div>
+        <div class="lbl">Incorrect Answers</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-4">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-star-fill"></i></div>
+        <div class="val" id="stat-average-score">{{ average_score }}</div>
+        <div class="lbl">Average Score</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-4">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-stopwatch-fill"></i></div>
+        <div class="val"><span id="stat-average-response-time">{{ average_response_time_seconds }}</span>s</div>
+        <div class="lbl">Average Response Time</div>
+      </div>
+    </div>
+    <div class="col-6 col-lg-4">
+      <div class="sq-card stat-card">
+        <div class="icon-badge"><i class="bi bi-question-circle-fill"></i></div>
+        <div class="val" id="stat-needs-review">{{ needs_review_answers }}</div>
+        <div class="lbl">Needs Review</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================== LEADERBOARD ============================== -->
+  <div class="sq-card p-3 p-md-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h5 mb-0">Leaderboard</h2>
+      <span class="sq-note"><i class="bi bi-arrow-repeat me-1"></i>Auto-refreshing</span>
+    </div>
+
+    {% if leaderboard %}
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Student Name</th>
+            <th>Roll Number</th>
+            <th>Course</th>
+            <th>Score</th>
+            <th>Correct</th>
+            <th>Incorrect</th>
+            <th>Needs Review</th>
+            <th>Avg. Response Time</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-tbody">
+          {% for row in leaderboard %}
+          <tr>
+            <td class="fw-semibold">{{ row.rank }}</td>
+            <td class="fw-semibold">{{ row.name }}</td>
+            <td>{{ row.roll_number }}</td>
+            <td>{{ row.course or "—" }}</td>
+            <td>{{ row.score }}</td>
+            <td style="color: var(--sq-mint);">{{ row.correct }}</td>
+            <td style="color: var(--sq-rose);">{{ row.incorrect }}</td>
+            <td style="color: var(--sq-amber);">{{ row.needs_review }}</td>
+            <td class="sq-note">{{ "%.2f"|format(row.avg_response_time_seconds) + "s" if row.avg_response_time_seconds is not none else "—" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5" id="leaderboard-empty">
+      <div class="icon-badge mx-auto mb-3" style="width:52px;height:52px;font-size:1.3rem;"><i class="bi bi-trophy"></i></div>
+      <h3 class="h6 mb-1">No students yet</h3>
+      <p class="sq-note mb-0">Once students join and submit answers, they'll show up here.</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- ============================== NEEDS REVIEW ============================== -->
+  <div class="sq-card p-3 p-md-4 mt-4" id="needs-review-section" {% if not needs_review_items %}style="display:none;"{% endif %}>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h5 mb-0"><i class="bi bi-question-circle-fill me-1" style="color: var(--sq-amber);"></i>Needs Review</h2>
+      <span class="sq-note">Short Answer responses the automated grader couldn't confidently classify</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th>Student</th>
+            <th>Question</th>
+            <th>Student's Answer</th>
+            <th>Expected Answer</th>
+            <th>Status</th>
+            <th class="text-end">Review</th>
+          </tr>
+        </thead>
+        <tbody id="needs-review-tbody">
+          {% for item in needs_review_items %}
+          <tr id="review-row-{{ item.response_id }}">
+            <td class="fw-semibold">{{ item.student_name }}</td>
+            <td>{{ item.question_text }}</td>
+            <td>{{ item.student_answer or "—" }}</td>
+            <td class="sq-note">{{ item.expected_answer or "—" }}</td>
+            <td>
+              <span class="badge-status {{ 'badge-live' if item.evaluation_status == 'EVALUATING' else 'badge-draft' }}">{{ item.evaluation_status }}</span>
+              {% if item.evaluation_method %}
+              <div class="sq-note" style="font-size: 0.72rem; text-transform: capitalize;">via {{ item.evaluation_method.replace('_', ' ') }}</div>
+              {% endif %}
+              {% if item.evaluation_confidence is not none %}
+              <div class="sq-note" style="font-size: 0.75rem;">confidence {{ "%.0f"|format(item.evaluation_confidence * 100) }}%</div>
+              {% endif %}
+              {% if item.evaluation_reason %}
+              <div class="sq-note" style="font-size: 0.75rem; max-width: 260px;">{{ item.evaluation_reason }}</div>
+              {% endif %}
+            </td>
+            <td class="text-end">
+              <form method="post" action="/admin/results/review/{{ item.response_id }}?session_id={{ session_id }}" class="d-inline">
+                <input type="hidden" name="decision" value="CORRECT">
+                <button type="submit" class="btn-sq-icon" title="Mark Correct" style="color: var(--sq-mint);"><i class="bi bi-check-lg"></i></button>
+              </form>
+              <form method="post" action="/admin/results/review/{{ item.response_id }}?session_id={{ session_id }}" class="d-inline">
+                <input type="hidden" name="decision" value="INCORRECT">
+                <button type="submit" class="btn-sq-icon danger" title="Mark Incorrect"><i class="bi bi-x-lg"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="sq-card p-3 p-md-4 mt-4" id="submission-events-section" {% if not submission_event_count %}style="display:none;"{% endif %}>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h5 mb-0"><i class="bi bi-shield-check me-1" style="color: var(--sq-primary);"></i>Exam Submission Diagnostics</h2>
+      <span class="sq-note"><span id="submission-event-count">{{ submission_event_count }}</span> recorded decisions · latest 200</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th>Server Receipt Time</th>
+            <th>Student</th>
+            <th>Submitted Question</th>
+            <th>Current Question</th>
+            <th>Decision</th>
+            <th>Deadline</th>
+            <th>Response</th>
+          </tr>
+        </thead>
+        <tbody id="submission-events-tbody">
+          {% for event in submission_events %}
+          <tr>
+            <td class="sq-note">{{ event.server_received_at }}</td>
+            <td>{{ event.student_name }} <span class="sq-note">({{ event.roll_number }})</span></td>
+            <td>Q{{ event.submitted_question_number }} · {{ event.submitted_question }}</td>
+            <td>{{ event.authoritative_question }}</td>
+            <td><span class="badge-status {{ 'badge-live' if event.event_type == 'SUBMISSION_ACCEPTED' else 'badge-draft' }}">{{ event.event_type }}</span></td>
+            <td class="sq-note">{{ event.deadline }}</td>
+            <td>{{ "#" ~ event.response_id if event.response_id else "—" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    // Pinned to whichever session this page was loaded for, so the 2s
+    // auto-refresh keeps showing THIS competition's results rather than
+    // silently drifting to whatever session happens to be most recent.
+    var currentSessionId = {{ session_id|tojson }};
+
+    function escapeHtml(str) {
+      var div = document.createElement('div');
+      div.textContent = str == null ? '' : str;
+      return div.innerHTML;
+    }
+
+    function renderLeaderboard(rows) {
+      var tbody = document.getElementById('leaderboard-tbody');
+      if (!tbody) return; // empty-state markup has no tbody to update
+      tbody.innerHTML = rows.map(function (row) {
+        var avgRt = row.avg_response_time_seconds != null ? row.avg_response_time_seconds.toFixed(2) + 's' : '—';
+        return '<tr>' +
+          '<td class="fw-semibold">' + row.rank + '</td>' +
+          '<td class="fw-semibold">' + escapeHtml(row.name) + '</td>' +
+          '<td>' + escapeHtml(row.roll_number) + '</td>' +
+          '<td>' + (escapeHtml(row.course) || '—') + '</td>' +
+          '<td>' + row.score + '</td>' +
+          '<td style="color: var(--sq-mint);">' + row.correct + '</td>' +
+          '<td style="color: var(--sq-rose);">' + row.incorrect + '</td>' +
+          '<td style="color: var(--sq-amber);">' + row.needs_review + '</td>' +
+          '<td class="sq-note">' + avgRt + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function renderNeedsReview(items, sessionId) {
+      var section = document.getElementById('needs-review-section');
+      var tbody = document.getElementById('needs-review-tbody');
+      if (!section || !tbody) return;
+      section.style.display = items.length ? '' : 'none';
+      tbody.innerHTML = items.map(function (item) {
+        var badgeClass = item.evaluation_status === 'EVALUATING' ? 'badge-live' : 'badge-draft';
+        var methodLine = item.evaluation_method
+          ? '<div class="sq-note" style="font-size:0.72rem; text-transform:capitalize;">via ' + escapeHtml(item.evaluation_method.replace(/_/g, ' ')) + '</div>'
+          : '';
+        var conf = item.evaluation_confidence != null
+          ? '<div class="sq-note" style="font-size:0.75rem;">confidence ' + Math.round(item.evaluation_confidence * 100) + '%</div>'
+          : '';
+        var reasonLine = item.evaluation_reason
+          ? '<div class="sq-note" style="font-size:0.75rem; max-width:260px;">' + escapeHtml(item.evaluation_reason) + '</div>'
+          : '';
+        var reviewUrl = '/admin/results/review/' + item.response_id + (sessionId ? '?session_id=' + sessionId : '');
+        return '<tr id="review-row-' + item.response_id + '">' +
+          '<td class="fw-semibold">' + escapeHtml(item.student_name) + '</td>' +
+          '<td>' + escapeHtml(item.question_text) + '</td>' +
+          '<td>' + escapeHtml(item.student_answer || '—') + '</td>' +
+          '<td class="sq-note">' + escapeHtml(item.expected_answer || '—') + '</td>' +
+          '<td><span class="badge-status ' + badgeClass + '">' + escapeHtml(item.evaluation_status) + '</span>' + methodLine + conf + reasonLine + '</td>' +
+          '<td class="text-end">' +
+            '<form method="post" action="' + reviewUrl + '" class="d-inline">' +
+              '<input type="hidden" name="decision" value="CORRECT">' +
+              '<button type="submit" class="btn-sq-icon" title="Mark Correct" style="color: var(--sq-mint);"><i class="bi bi-check-lg"></i></button>' +
+            '</form>' +
+            '<form method="post" action="' + reviewUrl + '" class="d-inline">' +
+              '<input type="hidden" name="decision" value="INCORRECT">' +
+              '<button type="submit" class="btn-sq-icon danger" title="Mark Incorrect"><i class="bi bi-x-lg"></i></button>' +
+            '</form>' +
+          '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function renderSubmissionEvents(items, count) {
+      var section = document.getElementById('submission-events-section');
+      var tbody = document.getElementById('submission-events-tbody');
+      var countEl = document.getElementById('submission-event-count');
+      if (!section || !tbody || !countEl) return;
+      section.style.display = count ? '' : 'none';
+      countEl.textContent = count;
+      tbody.innerHTML = items.map(function (event) {
+        var badgeClass = event.event_type === 'SUBMISSION_ACCEPTED' ? 'badge-live' : 'badge-draft';
+        var response = event.response_id ? '#' + event.response_id : '—';
+        return '<tr>' +
+          '<td class="sq-note">' + escapeHtml(event.server_received_at) + '</td>' +
+          '<td>' + escapeHtml(event.student_name) + ' <span class="sq-note">(' + escapeHtml(event.roll_number) + ')</span></td>' +
+          '<td>Q' + event.submitted_question_number + ' · ' + escapeHtml(event.submitted_question) + '</td>' +
+          '<td>' + escapeHtml(event.authoritative_question) + '</td>' +
+          '<td><span class="badge-status ' + badgeClass + '">' + escapeHtml(event.event_type) + '</span></td>' +
+          '<td class="sq-note">' + escapeHtml(event.deadline) + '</td>' +
+          '<td>' + response + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function poll() {
+      var url = '/admin/results/data' + (currentSessionId ? '?session_id=' + currentSessionId : '');
+      fetch(url)
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          document.getElementById('stat-total-students').textContent = data.total_students;
+          document.getElementById('stat-submitted-answers').textContent = data.submitted_answers;
+          document.getElementById('stat-correct-answers').textContent = data.correct_answers;
+          document.getElementById('stat-incorrect-answers').textContent = data.incorrect_answers;
+          document.getElementById('stat-average-score').textContent = data.average_score;
+          document.getElementById('stat-average-response-time').textContent = data.average_response_time_seconds;
+          document.getElementById('stat-needs-review').textContent = data.needs_review_answers;
+          renderLeaderboard(data.leaderboard);
+          renderNeedsReview(data.needs_review_items, currentSessionId);
+          renderSubmissionEvents(data.submission_events, data.submission_event_count);
+        })
+        .catch(function () { /* transient network hiccup — keep polling */ });
+    }
+
+    setInterval(poll, 2000);
+  })();
+</script>
+{% endblock %}

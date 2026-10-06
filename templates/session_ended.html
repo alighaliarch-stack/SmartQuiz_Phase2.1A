@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Session Ended · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <header class="sq-hero sq-hero-compact container">
+    <div class="sq-card sq-placeholder-panel sq-animate delay-1">
+      <div class="icon-badge mx-auto"><i class="bi bi-flag-fill"></i></div>
+
+      <h1 style="font-size: clamp(1.6rem, 4vw, 2.1rem);">Session ended</h1>
+      <p class="lead-sub mb-4">
+        {% if quiz %}
+          <strong style="color: var(--sq-text);">{{ quiz.title }}</strong> has ended. Thanks for participating!
+        {% else %}
+          This session has ended. Thanks for participating!
+        {% endif %}
+      </p>
+
+      <a href="/join" class="btn btn-sq btn-sq-outline">
+        <i class="bi bi-arrow-clockwise me-2"></i>Back to Join
+      </a>
+    </div>
+  </header>
+{% endblock %}

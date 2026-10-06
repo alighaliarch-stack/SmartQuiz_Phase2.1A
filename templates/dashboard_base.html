@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }} · Dashboard{% endblock %}</title>
+
+  <!-- Bootstrap 5 (CDN — see note at bottom of file about self-hosting later) -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+
+  <style>
+    :root {
+      /* ---- SmartQuiz brand palette — see base.html for the sampling notes ---- */
+      --sq-primary: #F5820A;
+      --sq-primary-hi: #FFA733;
+      --sq-mint: #3FA34D;
+      --sq-mint-hi: #4CC15D;
+      --sq-rose: #E5342A;
+      --sq-rose-hi: #FF6B5C;
+      --sq-amber: #FFB020;
+      --sq-success: var(--sq-mint);
+      --sq-warning: var(--sq-amber);
+      --sq-danger: var(--sq-rose);
+      --sq-ink: #1A130E;
+
+      --sq-bg-start: #16130F;
+      --sq-bg-end: #221A14;
+      --sq-text: #F3F0EC;
+      --sq-text-dim: rgba(243, 240, 236, 0.68);
+      --sq-text-faint: rgba(243, 240, 236, 0.46);
+      --sq-glass: rgba(255, 255, 255, 0.06);
+      --sq-glass-strong: rgba(255, 255, 255, 0.10);
+      --sq-glass-border: rgba(255, 255, 255, 0.13);
+      --sq-sidebar-w: 260px;
+      --sq-topbar-h: 68px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      min-height: 100%;
+      background: linear-gradient(160deg, var(--sq-bg-start), var(--sq-bg-end));
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--sq-text);
+      background:
+        radial-gradient(1000px 520px at -5% -10%, rgba(245, 130, 10, 0.24), transparent 60%),
+        radial-gradient(800px 460px at 108% 8%, rgba(63, 163, 77, 0.16), transparent 55%),
+        linear-gradient(160deg, var(--sq-bg-start), var(--sq-bg-end));
+      /* No background-attachment: fixed — see base.html for why (it leaves
+         a plain white gap below the fold on any page shorter than the
+         viewport; html now carries the same gradient as a safety net too). */
+    }
+
+    h1, h2, h3, .navbar-brand { font-weight: 800; letter-spacing: -0.02em; }
+    a { text-decoration: none; }
+
+    /* ------------------------------------------------------------- shell */
+
+    .sq-app-shell { display: flex; min-height: 100vh; }
+
+    .sq-sidebar {
+      width: var(--sq-sidebar-w);
+      flex-shrink: 0;
+      background: rgba(16, 14, 40, 0.55);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-right: 1px solid var(--sq-glass-border);
+      position: fixed;
+      top: 0; bottom: 0; left: 0;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      transition: transform .25s ease;
+    }
+
+    .sq-sidebar .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 1.35rem 1.4rem;
+      font-size: 1.1rem;
+      font-weight: 800;
+      color: var(--sq-text);
+      border-bottom: 1px solid var(--sq-glass-border);
+    }
+    .sq-sidebar .brand-mark {
+      width: 32px; height: 32px; border-radius: 9px;
+      background: linear-gradient(135deg, var(--sq-primary-hi), var(--sq-mint));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 900; color: var(--sq-ink); font-size: 0.9rem;
+    }
+
+    .sq-sidebar-nav { padding: 1rem 0.8rem; flex: 1; }
+    .sq-sidebar-nav .nav-link {
+      display: flex; align-items: center; gap: 12px;
+      padding: 0.7rem 0.9rem;
+      border-radius: 12px;
+      color: var(--sq-text-dim);
+      font-weight: 600;
+      font-size: 0.94rem;
+      margin-bottom: 4px;
+      transition: background .15s ease, color .15s ease;
+    }
+    .sq-sidebar-nav .nav-link i { font-size: 1.05rem; width: 20px; text-align: center; }
+    .sq-sidebar-nav .nav-link:hover { background: var(--sq-glass); color: var(--sq-text); }
+    .sq-sidebar-nav .nav-link.active {
+      background: linear-gradient(135deg, rgba(245, 130, 10,0.35), rgba(63, 163, 77,0.14));
+      color: #fff;
+      border: 1px solid rgba(245, 130, 10, 0.4);
+    }
+
+    .sq-sidebar-foot {
+      padding: 1rem 1.4rem 1.4rem;
+      border-top: 1px solid var(--sq-glass-border);
+      font-size: 0.78rem;
+      color: var(--sq-text-faint);
+    }
+
+    .sq-main-wrap {
+      margin-left: var(--sq-sidebar-w);
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sq-topbar {
+      height: var(--sq-topbar-h);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0 1.75rem;
+      background: rgba(20, 17, 48, 0.4);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--sq-glass-border);
+      position: sticky;
+      top: 0;
+      z-index: 40;
+    }
+    .sq-topbar .page-title { font-weight: 700; font-size: 1.05rem; }
+    .sq-topbar .sidebar-toggle {
+      display: none;
+      background: var(--sq-glass);
+      border: 1px solid var(--sq-glass-border);
+      color: var(--sq-text);
+      width: 38px; height: 38px;
+      border-radius: 10px;
+    }
+    .sq-topbar .user-chip {
+      display: flex; align-items: center; gap: 10px;
+      padding: 0.35rem 0.6rem 0.35rem 0.35rem;
+      background: var(--sq-glass);
+      border: 1px solid var(--sq-glass-border);
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--sq-text-dim);
+    }
+    .sq-topbar .user-chip .avatar {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--sq-primary-hi), var(--sq-mint));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; color: var(--sq-ink); font-size: 0.78rem;
+    }
+
+    .sq-content { padding: 1.75rem; }
+
+    /* ----------------------------------------------------------- overlay */
+    .sq-sidebar-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(6, 5, 18, 0.55);
+      z-index: 45;
+    }
+
+    @media (max-width: 991.98px) {
+      .sq-sidebar { transform: translateX(-100%); }
+      body.sq-sidebar-open .sq-sidebar { transform: translateX(0); }
+      body.sq-sidebar-open .sq-sidebar-overlay { display: block; }
+      .sq-main-wrap { margin-left: 0; }
+      .sq-topbar .sidebar-toggle { display: inline-flex; align-items: center; justify-content: center; }
+    }
+
+    /* --------------------------------------------------------- components */
+
+    .sq-card {
+      background: var(--sq-glass);
+      border: 1px solid var(--sq-glass-border);
+      border-radius: 18px;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      transition: transform .18s ease, border-color .18s ease;
+    }
+    .sq-card:hover { border-color: rgba(245, 130, 10, 0.4); }
+
+    .stat-card { padding: 1.4rem 1.5rem; }
+    .stat-card .icon-badge {
+      width: 42px; height: 42px; border-radius: 11px;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, var(--sq-primary-hi), var(--sq-mint));
+      color: var(--sq-ink); font-size: 1.05rem; margin-bottom: 0.9rem;
+    }
+    .stat-card .val { font-size: 1.9rem; font-weight: 800; line-height: 1; }
+    .stat-card .lbl { font-size: 0.8rem; color: var(--sq-text-faint); text-transform: uppercase; letter-spacing: .06em; font-weight: 700; margin-top: 6px; }
+
+    .btn-sq {
+      border-radius: 999px;
+      padding: 0.65rem 1.4rem;
+      font-weight: 700;
+      border: none;
+      font-size: 0.92rem;
+      transition: transform .15s ease, box-shadow .15s ease;
+    }
+    .btn-sq:active { transform: scale(0.97); }
+    .btn-sq-lg { padding: 0.8rem 1.9rem; font-size: 0.98rem; }
+    .btn-sq-primary {
+      background: linear-gradient(135deg, var(--sq-primary-hi), var(--sq-primary));
+      color: var(--sq-ink);
+      box-shadow: 0 8px 22px rgba(245, 130, 10, 0.4);
+    }
+    .btn-sq-primary:hover { color: var(--sq-ink); box-shadow: 0 10px 28px rgba(245, 130, 10, 0.55); transform: translateY(-1px); }
+    .btn-sq-outline {
+      background: var(--sq-glass);
+      border: 1.5px solid var(--sq-glass-border);
+      color: var(--sq-text);
+    }
+    .btn-sq-outline:hover { color: #fff; border-color: var(--sq-mint); transform: translateY(-1px); }
+    .btn-sq-icon {
+      width: 34px; height: 34px; padding: 0; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--sq-glass); border: 1px solid var(--sq-glass-border); color: var(--sq-text-dim);
+      font: inherit; cursor: pointer;
+    }
+    .btn-sq-icon:hover { color: var(--sq-text); border-color: var(--sq-primary-hi); }
+    .btn-sq-icon.danger:hover { color: var(--sq-rose); border-color: var(--sq-rose); }
+
+    .badge-status { border-radius: 999px; padding: 5px 12px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+    .badge-active { background: rgba(63, 163, 77,0.16); color: var(--sq-mint); }
+    .badge-draft { background: rgba(241,238,251,0.12); color: var(--sq-text-dim); }
+    .badge-completed { background: rgba(245, 130, 10,0.18); color: var(--sq-primary-hi); }
+    .badge-published { background: rgba(63, 163, 77,0.16); color: var(--sq-mint); }
+    .badge-live { background: rgba(229, 52, 42,0.18); color: var(--sq-rose); animation: sqBadgePulse 1.7s ease-in-out infinite; }
+    .badge-archived { background: rgba(241,238,251,0.08); color: var(--sq-text-faint); }
+
+    @keyframes sqBadgePulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
+    }
+
+    /* Bootstrap 5.3's table cells set background-color from the
+       --bs-table-bg custom property, which resolves to white by default
+       when nothing overrides it — this was the actual cause of every
+       "white table" (Recent Quizzes, Attendance, Leaderboard, Needs
+       Review): the surrounding card was correctly dark, but each <td>
+       painted its own white background over it. Overriding the variable
+       (rather than just background-color directly) matches how
+       Bootstrap's own table theming is designed to be customized. */
+    .sq-table {
+      --bs-table-bg: transparent;
+      --bs-table-color: var(--sq-text);
+      --bs-table-striped-bg: rgba(255, 255, 255, 0.03);
+      --bs-table-hover-bg: rgba(255, 255, 255, 0.04);
+    }
+    .sq-table thead th {
+      color: var(--sq-text-faint);
+      text-transform: uppercase;
+      font-size: 0.72rem;
+      letter-spacing: .06em;
+      font-weight: 700;
+      border-bottom: 1px solid var(--sq-glass-border);
+      padding-bottom: 0.75rem;
+    }
+    .sq-table tbody td {
+      padding: 0.9rem 0.5rem;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      vertical-align: middle;
+      color: var(--sq-text);
+      font-size: 0.92rem;
+    }
+    .sq-table tbody tr:last-child td { border-bottom: none; }
+    .sq-table tbody tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .form-label { font-weight: 600; font-size: 0.85rem; color: var(--sq-text-dim); }
+    .form-control, .form-select {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--sq-glass-border);
+      color: var(--sq-text);
+      border-radius: 12px;
+      padding: 0.7rem 0.9rem;
+    }
+    .form-control:focus, .form-select:focus {
+      background: rgba(245, 130, 10, 0.08);
+      border-color: var(--sq-primary);
+      color: var(--sq-text);
+      box-shadow: none;
+    }
+    .form-control::placeholder { color: var(--sq-text-faint); }
+
+    /* The native <input type="file"> button ignores .form-control's own
+       background/border/color — it's a separate browser-rendered
+       element (::file-selector-button, the modern name for what used to
+       be ::-webkit-file-upload-button) that defaults to a plain white
+       button regardless of the wrapper's dark styling. */
+    .form-control[type="file"]::file-selector-button {
+      background: var(--sq-glass-strong);
+      border: 1px solid var(--sq-glass-border);
+      color: var(--sq-text);
+      border-radius: 8px;
+      padding: 0.4rem 0.9rem;
+      margin-right: 0.9rem;
+      font-weight: 600;
+      font-size: 0.85rem;
+      transition: background .15s ease;
+    }
+    .form-control[type="file"]::file-selector-button:hover {
+      background: rgba(255, 255, 255, 0.16);
+    }
+
+    .sq-note {
+      font-size: 0.8rem;
+      color: var(--sq-text-faint);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .badge-live { animation: none; }
+    }
+
+    {% block extra_style %}{% endblock %}
+  </style>
+</head>
+<body>
+
+  <div class="sq-sidebar-overlay" data-sidebar-overlay></div>
+
+  <div class="sq-app-shell">
+    <!-- ============================= SIDEBAR ============================= -->
+    <aside class="sq-sidebar">
+      <a href="/" class="brand">
+        <span class="brand-mark">Q</span>
+        {{ app_name }}
+      </a>
+      <nav class="sq-sidebar-nav">
+        <a class="nav-link {% if active_page == 'dashboard' %}active{% endif %}" href="/admin">
+          <i class="bi bi-grid-1x2-fill"></i> Dashboard
+        </a>
+        <a class="nav-link {% if active_page == 'sessions' %}active{% endif %}" href="/admin/sessions">
+          <i class="bi bi-broadcast"></i> Live Sessions
+        </a>
+        <a class="nav-link {% if active_page == 'quizzes' %}active{% endif %}" href="/admin#recent-quizzes">
+          <i class="bi bi-patch-question-fill"></i> Quizzes
+        </a>
+        <a class="nav-link {% if active_page == 'students' %}active{% endif %}" href="/admin/students">
+          <i class="bi bi-people-fill"></i> Students
+        </a>
+        <a class="nav-link {% if active_page == 'music' %}active{% endif %}" href="/admin/music">
+          <i class="bi bi-music-note-beamed"></i> Music Library
+        </a>
+        <a class="nav-link {% if active_page == 'results' %}active{% endif %}" href="/admin/results">
+          <i class="bi bi-bar-chart-line-fill"></i> Results
+        </a>
+        <a class="nav-link {% if active_page == 'settings' %}active{% endif %}" href="/admin/settings">
+          <i class="bi bi-gear-fill"></i> Settings
+        </a>
+      </nav>
+      <div class="sq-sidebar-foot">
+        <div class="mb-2">Signed in as <strong style="color:var(--sq-text-dim)">Instructor</strong></div>
+        <form method="post" action="/logout">
+          <button type="submit" class="btn-sq-icon w-100" style="width: auto; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem;">
+            <i class="bi bi-box-arrow-right"></i> Log Out
+          </button>
+        </form>
+      </div>
+    </aside>
+
+    <!-- ============================ MAIN AREA ============================ -->
+    <div class="sq-main-wrap">
+      <nav class="sq-topbar">
+        <div class="d-flex align-items-center gap-3">
+          <button class="sidebar-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar">
+            <i class="bi bi-list"></i>
+          </button>
+          <span class="page-title">{% block page_title %}Dashboard{% endblock %}</span>
+        </div>
+        <div class="user-chip">
+          <span class="avatar">T</span>
+          <span class="d-none d-sm-inline">Instructor</span>
+        </div>
+      </nav>
+
+      <main class="sq-content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    (function () {
+      var toggleBtn = document.querySelector('[data-sidebar-toggle]');
+      var overlay = document.querySelector('[data-sidebar-overlay]');
+      function closeSidebar() { document.body.classList.remove('sq-sidebar-open'); }
+      if (toggleBtn) toggleBtn.addEventListener('click', function () {
+        document.body.classList.toggle('sq-sidebar-open');
+      });
+      if (overlay) overlay.addEventListener('click', closeSidebar);
+    })();
+  </script>
+  {% block extra_script %}{% endblock %}
+</body>
+</html>
+
+<!--
+  NOTE: Bootstrap and Bootstrap Icons are loaded from a CDN, which requires
+  internet access — same tradeoff noted in base.html (the public site
+  layout). Self-hosting under /static would need a StaticFiles mount in
+  app.py, intentionally not added here.
+-->

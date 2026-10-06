@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Answer Submitted · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <header class="sq-hero sq-hero-compact container">
+    <div class="sq-card sq-placeholder-panel sq-animate delay-1">
+      <div class="waiting-orb"><span class="emoji">✅</span></div>
+
+      <div class="sq-eyebrow mb-2">
+        <i class="bi bi-check-circle"></i> Answer received
+      </div>
+      <h1 style="font-size: clamp(1.6rem, 4vw, 2.1rem);">Waiting for the instructor…</h1>
+      <p class="lead-sub mb-2">Your answer was saved. This page moves on automatically when the instructor advances to the next question or ends the session.</p>
+    </div>
+    {% include "_radio_player_student.html" %}
+  </header>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    var sessionCode = {{ session_code|tojson }};
+    var studentId = {{ student.id|tojson if student else 'null' }};
+    var lastQuestion = {{ last_question|tojson }};
+
+    function poll() {
+      fetch('/session/' + sessionCode + '/status?student_id=' + studentId)
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data.session_status === 'SESSION_ENDED') {
+            window.location.href = '/student/session/' + sessionCode + '/ended';
+          } else if (data.student_completed) {
+            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId;
+          } else if (data.session_status === 'IN_PROGRESS' && data.student_current_question > lastQuestion) {
+            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId;
+          }
+        })
+        .catch(function () { /* transient network hiccup — keep polling */ });
+    }
+
+    poll();
+    setInterval(poll, 2000);
+
+    // See session_question.html for why.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') poll();
+    });
+  })();
+</script>
+{% endblock %}

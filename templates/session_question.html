@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% block title %}Question {{ question_number }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <header class="sq-hero sq-hero-compact container">
+    <div class="sq-card sq-placeholder-panel sq-animate delay-1" style="max-width: 560px;">
+      <div class="sq-eyebrow mb-2">
+        <i class="bi bi-broadcast"></i> {{ quiz.title }}
+      </div>
+
+      {% if not question %}
+        <div class="icon-badge mx-auto"><i class="bi bi-exclamation-circle"></i></div>
+        <h1 style="font-size: clamp(1.5rem, 4vw, 2rem);">No questions yet</h1>
+        <p class="lead-sub">This quiz doesn't have any questions to answer yet.</p>
+
+      {% else %}
+        <div class="text-start">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="sq-note">Question {{ question_number }} of {{ total_questions }} · {{ question_type_labels.get(question.question_type, question.question_type) }} · {{ question.points }} pt{{ '' if question.points == 1 else 's' }}</div>
+            {% if question_ends_at %}
+            <div id="timer-display" class="fw-semibold" style="color: var(--sq-mint); font-variant-numeric: tabular-nums;">--:--</div>
+            {% endif %}
+          </div>
+          <h1 style="font-size: clamp(1.4rem, 4vw, 1.9rem); margin-bottom: 1rem;">{{ question.question_text }}</h1>
+
+          {% if question.image_path %}
+          <img src="{{ question.image_path }}" alt="" style="width:100%; border-radius: 14px; margin-bottom: 1.25rem;">
+          {% endif %}
+
+          <div id="submit-success" class="d-none" style="padding: 12px 16px; border-radius: 12px; background: rgba(63, 163, 77,0.14); border: 1px solid rgba(63, 163, 77,0.4); color: var(--sq-mint); font-weight: 600; margin-bottom: 1rem;">
+            <i class="bi bi-check-circle-fill me-2"></i><span id="submit-success-text">Answer submitted successfully.</span>
+            <div class="sq-note mt-1" style="color: var(--sq-mint); opacity: 0.8;">Waiting for the instructor to move to the next question…</div>
+          </div>
+          <div id="submit-rejection" class="d-none" role="alert" style="padding: 12px 16px; border-radius: 12px; background: rgba(220, 53, 69,0.12); border: 1px solid rgba(220, 53, 69,0.4); color: var(--sq-rose); font-weight: 600; margin-bottom: 1rem;"></div>
+
+          <form id="answer-form" data-action="/student/session/{{ session_code }}/question/{{ question_number }}">
+            <input type="hidden" name="student_id" value="{{ student.id }}">
+            <input type="hidden" name="question_id" value="{{ question.id }}">
+            <input type="hidden" name="question_displayed_at" value="{{ question_displayed_at }}">
+
+            {% if question.question_type in ["mcq_single", "true_false"] %}
+              {% for opt in options %}
+              <label class="option-btn-label d-block mb-2" style="cursor: pointer;">
+                <div class="d-flex align-items-center gap-3 p-3" style="border: 1.5px solid var(--sq-glass-border); border-radius: 14px; background: rgba(255,255,255,0.03);">
+                  <input type="radio" name="selected_option" value="{{ opt }}" required
+                         {% if already_submitted %}disabled{% endif %}
+                         {% if previous_selected_option == opt %}checked{% endif %}
+                         style="width: 20px; height: 20px; accent-color: var(--sq-mint); flex-shrink: 0;">
+                  <span style="color: var(--sq-text);">{{ opt }}</span>
+                </div>
+              </label>
+              {% endfor %}
+              <button type="submit" id="submit-btn" class="btn btn-sq btn-sq-primary btn-block w-100 mt-3" {% if already_submitted %}disabled{% endif %}>
+                <i class="bi bi-send-fill me-2"></i>Submit Answer
+              </button>
+
+            {% elif question.question_type == "mcq_multiple" %}
+              {% for opt in options %}
+              <label class="option-btn-label d-block mb-2" style="cursor: pointer;">
+                <div class="d-flex align-items-center gap-3 p-3" style="border: 1.5px solid var(--sq-glass-border); border-radius: 14px; background: rgba(255,255,255,0.03);">
+                  <input type="checkbox" name="selected_options" value="{{ opt }}"
+                         {% if already_submitted %}disabled{% endif %}
+                         {% if opt in previous_selected_options %}checked{% endif %}
+                         style="width: 20px; height: 20px; accent-color: var(--sq-mint); flex-shrink: 0; border-radius: 6px;">
+                  <span style="color: var(--sq-text);">{{ opt }}</span>
+                </div>
+              </label>
+              {% endfor %}
+              <p class="sq-note mb-2 mt-1" style="font-size: 0.82rem;"><i class="bi bi-info-circle me-1"></i>Select all that apply.</p>
+              <button type="submit" id="submit-btn" class="btn btn-sq btn-sq-primary btn-block w-100" {% if already_submitted %}disabled{% endif %}>
+                <i class="bi bi-send-fill me-2"></i>Submit Answer
+              </button>
+
+            {% elif question.question_type == "short_answer" %}
+              <input type="text" name="selected_option" class="form-control mb-3" placeholder="Type your answer…"
+                     value="{{ previous_selected_option or '' }}" required autocomplete="off"
+                     {% if already_submitted %}disabled{% endif %}
+                     style="background: rgba(255,255,255,0.04); border: 1.5px solid var(--sq-glass-border); border-radius: 14px; padding: 14px 16px; color: var(--sq-text); font-size: 1rem;">
+              <button type="submit" id="submit-btn" class="btn btn-sq btn-sq-primary btn-block w-100" {% if already_submitted %}disabled{% endif %}>
+                <i class="bi bi-send-fill me-2"></i>Submit Answer
+              </button>
+
+            {% else %}
+              <div class="sq-note mb-3" style="padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,0.04);">
+                <i class="bi bi-info-circle me-1"></i>Unrecognized question type ({{ question_type_labels.get(question.question_type, question.question_type) }}).
+              </div>
+              <button type="submit" id="submit-btn" class="btn btn-sq btn-sq-outline btn-block w-100" {% if already_submitted %}disabled{% endif %}>
+                <i class="bi bi-arrow-right me-2"></i>Continue
+              </button>
+            {% endif %}
+          </form>
+        </div>
+      {% endif %}
+    </div>
+    {% include "_radio_player_student.html" %}
+  </header>
+{% endblock %}
+
+{% block extra_script %}
+{% if question %}
+<script>
+  (function () {
+    var form = document.getElementById('answer-form');
+    var successBox = document.getElementById('submit-success');
+    var successText = document.getElementById('submit-success-text');
+    var rejectionBox = document.getElementById('submit-rejection');
+    var submitBtn = document.getElementById('submit-btn');
+    var alreadySubmitted = {{ already_submitted|tojson }};
+    var examMode = {{ quiz.exam_mode|tojson }};
+
+    if (alreadySubmitted) {
+      successBox.classList.remove('d-none');
+    }
+
+    function lockAnswers() {
+      form.querySelectorAll('input[type="radio"], input[type="checkbox"], input[type="text"]').forEach(function (input) {
+        input.disabled = true;
+      });
+      submitBtn.disabled = true;
+    }
+
+    function submitAnswer(isTimeout) {
+      if (submitBtn.disabled && !isTimeout) return; // already submitted — no-op
+      if (window.__sqSubmitted) return; // guard against double-fire (manual click + timeout racing)
+      window.__sqSubmitted = true;
+
+      var formData = new FormData(form);
+      lockAnswers();
+      submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>Submitting…';
+
+      fetch(form.dataset.action, { method: 'POST', body: formData })
+        .then(function (res) {
+          if (!res.ok) throw new Error('Submit failed');
+          return res.json();
+        })
+        .then(function (data) {
+          if (data.success) {
+            if (data.student_completed) {
+              // THIS student has now answered every question — this is
+              // computed from their own responses, not the session's
+              // shared question index, and can be true even while the
+              // teacher's session stays Live.
+              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/completed?student_id=' + {{ student.id|tojson }};
+              return;
+            }
+            if (data.next_question_number) {
+              // Auto Advance moved this student's own pacing forward —
+              // go straight there now, rather than showing "waiting for
+              // the instructor" and relying on the next poll to notice.
+              // Never fires when Auto Advance is off (the field is only
+              // ever set in that mode) or for a duplicate/late submit.
+              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/question/' + data.next_question_number + '?student_id=' + {{ student.id|tojson }};
+              return;
+            }
+            if (isTimeout) {
+              successText.textContent = "Time's up — your answer was submitted automatically.";
+            }
+            successBox.classList.remove('d-none');
+          } else if (data.code) {
+            var rejectionMessages = {
+              SUBMISSION_EXPIRED: "Time expired before the server received your answer. No answer was recorded.",
+              SUBMISSION_NOT_CURRENT: "This is no longer the current question. Refreshing your session state…",
+              SUBMISSION_WRONG_SESSION_QUESTION: "This question does not belong to this exam session.",
+              SUBMISSION_SESSION_ENDED: "This exam session has ended. No answer was recorded.",
+              SUBMISSION_STUDENT_COMPLETED: "Your exam is already complete. No additional answer was recorded.",
+              SUBMISSION_STUDENT_NOT_IN_SESSION: "This student attempt does not belong to this exam session."
+            };
+            rejectionBox.textContent = rejectionMessages[data.code] || "The server rejected this submission (" + data.code + ").";
+            rejectionBox.classList.remove('d-none');
+            if (data.code === 'SUBMISSION_SESSION_ENDED') {
+              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/ended';
+            } else if (data.code === 'SUBMISSION_STUDENT_COMPLETED') {
+              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/completed?student_id=' + {{ student.id|tojson }};
+            }
+          }
+        })
+        .catch(function () {
+          window.__sqSubmitted = false;
+          if (!isTimeout) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="bi bi-send-fill me-2"></i>Submit Answer';
+          }
+        });
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      // mcq_multiple uses checkboxes, which have no native HTML
+      // "at least one of this group" constraint the way a required
+      // radio group does — enforce it manually for a manual click only;
+      // the timeout auto-submit path calls submitAnswer() directly and
+      // intentionally skips this, consistent with how every other type
+      // is allowed to auto-submit empty when time runs out.
+      var checkboxes = form.querySelectorAll('input[type="checkbox"][name="selected_options"]');
+      if (checkboxes.length > 0) {
+        var anyChecked = Array.prototype.some.call(checkboxes, function (cb) { return cb.checked; });
+        if (!anyChecked) {
+          checkboxes[0].focus();
+          return;
+        }
+      }
+      submitAnswer(false);
+    });
+
+    {% if question_ends_at %}
+    // ------------------------------------------------------ countdown timer --
+    (function () {
+      var endsAt = new Date({{ question_ends_at|tojson }}).getTime();
+      var display = document.getElementById('timer-display');
+      var timedOut = false;
+
+      function tick() {
+        var remainingMs = endsAt - Date.now();
+        if (remainingMs <= 0) {
+          display.textContent = '00:00';
+          if (!timedOut) {
+            timedOut = true;
+            if (examMode) {
+              rejectionBox.textContent = "Your device countdown reached zero. The server decides whether an answer arrived before the deadline; no blank answer will be submitted automatically.";
+              rejectionBox.classList.remove('d-none');
+            } else {
+              lockAnswers(); // Classroom Mode retains its existing timeout behavior
+              if (!alreadySubmitted) {
+                submitAnswer(true);
+              }
+            }
+          }
+          clearInterval(timerHandle);
+          return;
+        }
+        var totalSeconds = Math.ceil(remainingMs / 1000);
+        var m = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+        var s = (totalSeconds % 60).toString().padStart(2, '0');
+        display.textContent = m + ':' + s;
+        if (totalSeconds <= 10) display.style.color = 'var(--sq-rose)';
+      }
+
+      tick();
+      var timerHandle = setInterval(tick, 1000);
+    })();
+    {% endif %}
+  })();
+</script>
+{% endif %}
+
+<script>
+  // Watches for the instructor moving the class forward, whether or not
+  // this student has answered yet — matches "Next Question automatically
+  // sends every connected student to the next question."
+  (function () {
+    var sessionCode = {{ session_code|tojson }};
+    var studentId = {{ student.id|tojson }};
+    var myQuestionNumber = {{ question_number|tojson }};
+    var examMode = {{ quiz.exam_mode|tojson }};
+
+    function poll() {
+      fetch('/session/' + sessionCode + '/status?student_id=' + studentId)
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data.session_status === 'SESSION_ENDED') {
+            window.location.href = '/student/session/' + sessionCode + '/ended';
+          } else if (data.student_completed) {
+            // This student personally finished — checked independently of
+            // where the session's shared question index is.
+            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId;
+          } else if (examMode && data.exam_question_expired) {
+            var form = document.getElementById('answer-form');
+            if (form) {
+              form.querySelectorAll('input, button[type="submit"]').forEach(function (input) {
+                input.disabled = true;
+              });
+            }
+            var rejection = document.getElementById('submit-rejection');
+            if (rejection) {
+              rejection.textContent = 'Time expired according to the server. No answer was recorded.';
+              rejection.classList.remove('d-none');
+            }
+          } else if (data.session_status === 'IN_PROGRESS' && data.student_current_question > myQuestionNumber) {
+            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId;
+          }
+          // else: still on the same question, or session is QUIZ_COMPLETED
+          // and this student hasn't answered yet — stay right here, they
+          // can still submit.
+        })
+        .catch(function () { /* transient network hiccup — keep polling */ });
+    }
+
+    setInterval(poll, 2000);
+
+    // Mobile browsers commonly throttle or fully pause setInterval while
+    // a tab is backgrounded/suspended (switching apps, locking the
+    // screen). Without this, a student who was on Question 2 when they
+    // backgrounded the tab could still be looking at Question 2 for a
+    // few extra seconds after returning — right up to the next natural
+    // 2s tick — even though the class had already moved to Question 4.
+    // Polling immediately the moment the tab becomes visible again closes
+    // that gap instead of waiting on the timer.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') poll();
+    });
+  })();
+</script>
+{% endblock %}
