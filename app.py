@@ -1590,11 +1590,11 @@ def _ensure_exam_questions_mutable(db: Session, quiz_id: int) -> None:
 
 
 def _lock_session_for_submission(db: Session, session_id: int) -> None:
-    """Acquire SQLite's write reservation before reading Exam Mode state.
+    """Acquire SQLite's write reservation before reading submission state.
 
     Teacher progression actions acquire the same reservation first, so
     SQLite transaction order determines whether a submission or an
-    advance/completion is authoritative.
+    advance/completion/end action is authoritative.
     """
     db.execute(
         text("UPDATE sessions SET id = id WHERE id = :session_id"),
@@ -1709,10 +1709,14 @@ def _unique_session_code(db: Session) -> str:
 
 
 def _session_phase(quiz: Quiz, session: LiveSession | None) -> str:
-    """Names exactly where a quiz sits in the lifecycle:
+    """Names the phase of a specific session, or the quiz when no session exists:
 
         DRAFT -> PUBLISHED -> WAITING -> QUESTION_1..N
               -> QUIZ_COMPLETED -> SESSION_ENDED
+
+    A supplied session owns its lifecycle. The parent quiz can be
+    republished and reused after that session ends, so its status must
+    not override the state of a historical session.
 
     "Start Session" only ever produces WAITING (students can join and
     wait; current_question_index stays 0, no timer). Only an explicit
@@ -1729,17 +1733,22 @@ def _session_phase(quiz: Quiz, session: LiveSession | None) -> str:
     quiz (or auto-advance running off the end of the last question) from
     instantly terminating the whole session.
     """
-    if quiz.status == "Draft":
-        return "DRAFT"
-    if quiz.status == "Published":
-        return "PUBLISHED"
-    if quiz.status == "Live":
-        if not session or session.current_question_index == 0:
+    if session is not None:
+        if session.status != "Live":
+            return "SESSION_ENDED"
+        if session.current_question_index == 0:
             return "WAITING"
         total_questions = len(quiz.questions)
         if session.current_question_index <= total_questions:
             return f"QUESTION_{session.current_question_index}"
         return "QUIZ_COMPLETED"
+
+    if quiz.status == "Draft":
+        return "DRAFT"
+    if quiz.status == "Published":
+        return "PUBLISHED"
+    if quiz.status == "Live":
+        return "WAITING"
     return "SESSION_ENDED"  # Completed / Archived
 
 
@@ -2252,6 +2261,21 @@ def session_question_submit(
             received_at=received_at,
         )
 
+    session_id = session.id
+    db.rollback()
+    _lock_session_for_submission(db, session_id)
+    session = db.query(LiveSession).filter(LiveSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session, student, or question not found")
+    if session.status != "Live":
+        return {
+            "success": False,
+            "code": "SUBMISSION_SESSION_ENDED",
+            "already_submitted": False,
+            "student_completed": False,
+            "next_question_number": None,
+        }
+
     student = db.query(Student).filter(Student.id == student_id).first()
     question = db.query(Question).filter(Question.id == question_id).first()
     if not student or not question:
@@ -2263,8 +2287,7 @@ def session_question_submit(
     # first server contact must still be able to advance them correctly
     # afterward, not silently no-op because current_question_index was
     # still 0.
-    if _ensure_student_question_state(session, student):
-        db.commit()
+    progress_initialized = _ensure_student_question_state(session, student)
 
     # Prevent duplicate submissions WITHIN this attempt: if this student
     # already answered this question in THIS session, don't insert again
@@ -2281,6 +2304,8 @@ def session_question_submit(
         .first()
     )
     if existing:
+        if progress_initialized:
+            db.commit()
         return {
             "success": True,
             "already_submitted": True,

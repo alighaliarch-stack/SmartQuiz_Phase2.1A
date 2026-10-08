@@ -5,9 +5,11 @@ continue using Classroom Mode unless a teacher enables it.
 
 ## Authoritative submission flow
 
-The existing student submission endpoint remains unchanged. For an Exam Mode
-quiz it captures the server receipt time, obtains the session write reservation,
-and then reloads the session, student, quiz, question, and effective per-student
+For every quiz mode, the student submission endpoint reloads the addressed
+session under a SQLite write reservation and rejects submissions if that
+specific session is no longer Live. This also serializes Classroom Mode
+submissions against teacher session-ending actions. For an Exam Mode quiz the
+endpoint then reloads the student, quiz, question, and effective per-student
 progress before making a decision. Client clocks and the posted
 `question_displayed_at` value are not used for enforcement.
 
@@ -26,7 +28,14 @@ previous deadline without creating a Response; a late attempt against that
 personally expired question is still audited as `SUBMISSION_EXPIRED`. Without
 Auto Advance, an expired unanswered question remains current until teacher
 progression. A final expired question remains unanswered. Classroom Mode keeps
-its existing timeout-submission behavior.
+its existing timeout-submission behavior. A completed session remains ended
+for status reads even when its parent quiz is republished or reused for a new
+session; each LiveSession's own status is authoritative whenever that session
+is evaluated.
+
+The v2.1c.1 corrective release applies these lifecycle checks without a schema
+change. It preserves the Exam Mode submission-integrity protections described
+here.
 
 ## Audit events
 
