@@ -26,11 +26,21 @@
           <label for="teacher-password" class="form-label" style="color: var(--sq-text-dim); font-weight:600; font-size:0.85rem;">Password</label>
           <input type="password" class="form-control" id="teacher-password" name="password" placeholder="Enter your password" required autofocus
                  style="background: rgba(255,255,255,0.06); border: 1px solid var(--sq-glass-border); color: var(--sq-text); border-radius: 12px; padding: 0.7rem 0.9rem;">
+          <div class="form-check mt-2">
+            <input class="form-check-input" type="checkbox" id="show-teacher-password">
+            <label class="form-check-label" for="show-teacher-password">Show password</label>
+          </div>
         </div>
         <button type="submit" class="btn btn-sq btn-sq-primary w-100">
           <i class="bi bi-box-arrow-in-right me-2"></i>Log In
         </button>
       </form>
+
+      <script>
+        document.getElementById("show-teacher-password").addEventListener("change", function () {
+          document.getElementById("teacher-password").type = this.checked ? "text" : "password";
+        });
+      </script>
 
       <p class="sq-note mt-4 mb-0" style="font-size: 0.8rem;">
         First time here? Check the server console for a temporary password, generated automatically the first time SmartQuiz started.
