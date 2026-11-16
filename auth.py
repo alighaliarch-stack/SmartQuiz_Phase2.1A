@@ -41,6 +41,7 @@ from models import AppSetting
 PBKDF2_ITERATIONS = 260_000
 PASSWORD_HASH_KEY = "teacher_password_hash"
 SESSION_KEY = "teacher_authenticated"
+STUDENT_ACCOUNT_SESSION_KEY = "student_account_id"
 
 
 def hash_password(password: str) -> str:
@@ -120,11 +121,27 @@ def is_teacher_authenticated(request: Request) -> bool:
 
 
 def log_in_teacher(request: Request) -> None:
+    request.session.pop(STUDENT_ACCOUNT_SESSION_KEY, None)
     request.session[SESSION_KEY] = True
 
 
 def log_out_teacher(request: Request) -> None:
     request.session.pop(SESSION_KEY, None)
+
+
+def student_account_id_from_session(request: Request) -> int | None:
+    value = request.session.get(STUDENT_ACCOUNT_SESSION_KEY)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def log_in_student(request: Request, account_id: int) -> None:
+    request.session.pop(SESSION_KEY, None)
+    request.session.pop(STUDENT_ACCOUNT_SESSION_KEY, None)
+    request.session[STUDENT_ACCOUNT_SESSION_KEY] = account_id
+
+
+def log_out_student(request: Request) -> None:
+    request.session.pop(STUDENT_ACCOUNT_SESSION_KEY, None)
 
 
 class TeacherAuthRequired(Exception):

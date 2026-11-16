@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Student Login · {{ app_name }}{% endblock %}
+
+{% block content %}
+<header class="sq-hero sq-hero-compact container">
+  <div class="sq-card sq-placeholder-panel sq-animate">
+    <h1>Student Login</h1>
+    <p class="lead-sub">Use the username and temporary password provided by your teacher.</p>
+    {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/student/login" class="text-start">
+      <div class="mb-3">
+        <label for="username" class="form-label">Username</label>
+        <input id="username" name="username" class="form-control" autocomplete="username" required>
+      </div>
+      <div class="mb-4">
+        <label for="password" class="form-label">Password</label>
+        <input id="password" name="password" type="password" class="form-control"
+               autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn btn-sq btn-sq-primary w-100">Log In</button>
+    </form>
+  </div>
+</header>
+{% endblock %}

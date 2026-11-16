@@ -1,0 +1,92 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Student Accounts · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+      <p class="text-uppercase small mb-1">Teacher management</p>
+      <h1 class="h2 mb-0">Student Accounts</h1>
+    </div>
+  </div>
+
+  <section class="sq-card p-4 mb-4">
+    <h2 class="h5">Create account</h2>
+    <p class="text-secondary">A temporary password is shown once after account creation.</p>
+    <form method="post" action="/admin/student-accounts" class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label" for="new-full-name">Full name</label>
+        <input class="form-control" id="new-full-name" name="full_name" maxlength="150" required>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="new-username">Username</label>
+        <input class="form-control" id="new-username" name="username" minlength="3" maxlength="80" required>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="new-student-code">Student code</label>
+        <input class="form-control" id="new-student-code" name="student_code" maxlength="32" required>
+      </div>
+      <div class="col-12">
+        <button class="btn btn-sq btn-sq-primary" type="submit">Create Account</button>
+      </div>
+    </form>
+  </section>
+
+  <form method="get" action="/admin/student-accounts" class="input-group mb-3">
+    <input class="form-control" name="q" value="{{ search }}" placeholder="Search name, username, or student code">
+    <button class="btn btn-sq btn-sq-outline" type="submit">Search</button>
+  </form>
+
+  {% for account in accounts %}
+  <section class="sq-card p-4 mb-3">
+    <form method="post" action="/admin/student-accounts/{{ account.id }}/edit" class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label">Full name</label>
+        <input class="form-control" name="full_name" value="{{ account.full_name }}" maxlength="150" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Username</label>
+        <input class="form-control" name="username" value="{{ account.username }}" maxlength="80" required>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Student code</label>
+        <input class="form-control" name="student_code" value="{{ account.student_code }}" maxlength="32" required>
+      </div>
+      <div class="col-md-2 d-flex align-items-end">
+        <button class="btn btn-sq btn-sq-outline w-100" type="submit">Save</button>
+      </div>
+    </form>
+    <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+      <span class="badge {% if account.is_active %}text-bg-success{% else %}text-bg-secondary{% endif %}">
+        {{ "Active" if account.is_active else "Inactive" }}
+      </span>
+      <span class="small text-secondary">
+        {{ "Password change required" if account.must_change_password else "Password set" }}
+      </span>
+      <form method="post" action="/admin/student-accounts/{{ account.id }}/status">
+        <input type="hidden" name="active" value="{{ 'false' if account.is_active else 'true' }}">
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">
+          {{ "Deactivate" if account.is_active else "Activate" }}
+        </button>
+      </form>
+      <form method="post" action="/admin/student-accounts/{{ account.id }}/reset-password">
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Reset Password</button>
+      </form>
+      <form method="post" action="/admin/student-accounts/{{ account.id }}/enrollments">
+        <select class="form-select form-select-sm d-inline-block" name="course_id" required>
+          <option value="">Choose course</option>
+          {% for course in courses %}<option value="{{ course.id }}">{{ course.name }}</option>{% endfor %}
+        </select>
+        <select class="form-select form-select-sm d-inline-block" name="module_id">
+          <option value="">Entire course</option>
+          {% for module in modules %}<option value="{{ module.id }}">{{ module.title }}</option>{% endfor %}
+        </select>
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Assign</button>
+      </form>
+    </div>
+  </section>
+  {% else %}
+  <p class="text-secondary">No student accounts found.</p>
+  {% endfor %}
+</div>
+{% endblock %}

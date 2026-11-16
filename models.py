@@ -147,6 +147,39 @@ class Question(Base):
     quiz = relationship("Quiz", back_populates="questions")
 
 
+class StudentAccount(Base):
+    """Teacher-provisioned persistent identity for learning and quiz participation."""
+
+    __tablename__ = "student_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(80), nullable=False, unique=True, index=True)
+    student_code = Column(String(32), nullable=False, unique=True, index=True)
+    full_name = Column(String(150), nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    must_change_password = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    quiz_participations = relationship("Student", back_populates="account")
+    enrollments = relationship(
+        "StudentAccountEnrollment",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+    flashcard_progress = relationship(
+        "StudentAccountFlashcardProgress",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+    flashcard_reviews = relationship(
+        "StudentAccountFlashcardReview",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+
+
 class Student(Base):
     __tablename__ = "students"
 
@@ -184,6 +217,7 @@ class Student(Base):
     # on the global session timer.
     current_question_index = Column(Integer, default=0, nullable=False)
     question_started_at = Column(DateTime, nullable=True)
+    account_id = Column(Integer, ForeignKey("student_accounts.id"), nullable=True, index=True)
 
     # Stable student identity for learning content / flashcards. The
     # legacy quiz participation fields remain in place for the existing
@@ -201,6 +235,7 @@ class Student(Base):
     enrollments = relationship("StudentEnrollment", back_populates="student", cascade="all, delete-orphan")
     flashcard_progress = relationship("StudentFlashcardProgress", back_populates="student", cascade="all, delete-orphan")
     flashcard_reviews = relationship("FlashcardReview", back_populates="student", cascade="all, delete-orphan")
+    account = relationship("StudentAccount", back_populates="quiz_participations")
 
 
 class Session(Base):
@@ -296,6 +331,7 @@ class LearningModule(Base):
     title = Column(String(200), nullable=False)
     description = Column(Text, default="", nullable=False)
     learning_objectives = Column(Text, default="", nullable=False)
+    status = Column(String(20), default="DRAFT", nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     course = relationship("Course", back_populates="modules")
@@ -371,6 +407,28 @@ class StudentEnrollment(Base):
     flashcard_progress = relationship("StudentFlashcardProgress", back_populates="enrollment", cascade="all, delete-orphan")
 
 
+class StudentAccountEnrollment(Base):
+    """Active course- or module-level assignment to a persistent student account."""
+
+    __tablename__ = "student_account_enrollments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("student_accounts.id"), nullable=False, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    module_id = Column(Integer, ForeignKey("learning_modules.id"), nullable=True, index=True)
+    status = Column(String(20), default="Active", nullable=False)
+    assigned_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+
+    account = relationship("StudentAccount", back_populates="enrollments")
+    course = relationship("Course")
+    module = relationship("LearningModule")
+    flashcard_progress = relationship(
+        "StudentAccountFlashcardProgress",
+        back_populates="enrollment",
+    )
+
+
 class Flashcard(Base):
     """Teacher-approved flashcard content generated from a source document."""
 
@@ -444,6 +502,32 @@ class StudentFlashcardProgress(Base):
     enrollment = relationship("StudentEnrollment", back_populates="flashcard_progress")
 
 
+class StudentAccountFlashcardProgress(Base):
+    """Spaced-repetition state owned by a persistent student account."""
+
+    __tablename__ = "student_account_flashcard_progress"
+    __table_args__ = (
+        UniqueConstraint("account_id", "flashcard_id", name="uq_account_flashcard_progress"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("student_accounts.id"), nullable=False, index=True)
+    flashcard_id = Column(Integer, ForeignKey("flashcards.id"), nullable=False, index=True)
+    enrollment_id = Column(Integer, ForeignKey("student_account_enrollments.id"), nullable=True, index=True)
+    due_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    interval_days = Column(Integer, default=0, nullable=False)
+    ease_factor = Column(Float, default=2.5, nullable=False)
+    review_count = Column(Integer, default=0, nullable=False)
+    last_rating = Column(String(20), nullable=True)
+    last_reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    account = relationship("StudentAccount", back_populates="flashcard_progress")
+    flashcard = relationship("Flashcard")
+    enrollment = relationship("StudentAccountEnrollment", back_populates="flashcard_progress")
+
+
 class FlashcardReview(Base):
     """History for one student review action."""
 
@@ -459,6 +543,23 @@ class FlashcardReview(Base):
 
     student = relationship("Student", back_populates="flashcard_reviews")
     flashcard = relationship("Flashcard", back_populates="reviews")
+
+
+class StudentAccountFlashcardReview(Base):
+    """Immutable review history for a persistent student account."""
+
+    __tablename__ = "student_account_flashcard_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("student_accounts.id"), nullable=False, index=True)
+    flashcard_id = Column(Integer, ForeignKey("flashcards.id"), nullable=False, index=True)
+    rating = Column(String(20), nullable=False)
+    interval_days = Column(Integer, default=1, nullable=False)
+    next_due_at = Column(DateTime, nullable=False)
+    reviewed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    account = relationship("StudentAccount", back_populates="flashcard_reviews")
+    flashcard = relationship("Flashcard")
 
 
 class MusicTrack(Base):

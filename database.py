@@ -261,6 +261,23 @@ def _run_migrations() -> None:
                 conn.execute(text("ALTER TABLE students ADD COLUMN current_question_index INTEGER DEFAULT 0"))
             if "question_started_at" not in student_cols:
                 conn.execute(text("ALTER TABLE students ADD COLUMN question_started_at DATETIME"))
+            if "account_id" not in student_cols:
+                # Nullable and additive: existing quiz-session participants
+                # remain valid anonymous records with no account association.
+                conn.execute(text(
+                    "ALTER TABLE students ADD COLUMN account_id INTEGER "
+                    "REFERENCES student_accounts(id)"
+                ))
+
+        if "learning_modules" in tables:
+            module_cols = _existing_columns(conn, "learning_modules")
+            if "status" not in module_cols:
+                # Existing learning modules stay unavailable until a
+                # teacher explicitly publishes them.
+                conn.execute(text(
+                    "ALTER TABLE learning_modules ADD COLUMN status "
+                    "VARCHAR(20) NOT NULL DEFAULT 'DRAFT'"
+                ))
 
         if "sessions" in tables:
             session_cols = _existing_columns(conn, "sessions")
