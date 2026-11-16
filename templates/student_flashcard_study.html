@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Flashcard Study · {{ app_name }}{% endblock %}
+
+{% block extra_head %}
+<style>
+  .study-shell { max-width: 760px; }
+  .study-card { min-height: 270px; display: flex; flex-direction: column; justify-content: center; cursor: pointer; }
+  .study-card:focus-visible { outline: 3px solid var(--sq-primary-hi); outline-offset: 3px; }
+  .study-answer { white-space: pre-wrap; }
+  .rating-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
+  @media (max-width: 575.98px) { .rating-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); } .study-card { min-height: 220px; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<main class="container study-shell py-4 py-md-5">
+  <div class="d-flex justify-content-between align-items-center gap-2 mb-4">
+    <div><p class="sq-eyebrow mb-2">Spaced repetition</p><h1 class="h2 mb-0">Flashcard study</h1><p class="text-secondary mb-0">{{ module_title }}</p></div>
+    <a class="btn btn-sq btn-sq-outline" href="/student/dashboard">Dashboard</a>
+  </div>
+  <div class="d-flex flex-wrap gap-3 mb-3" aria-live="polite">
+    <span class="badge text-bg-secondary">Reviewed today: <span id="reviewed-today">0</span></span>
+    <span class="badge text-bg-secondary">Cards remaining: <span id="remaining-count">0</span></span>
+  </div>
+  <div id="study-error" class="alert alert-danger d-none" role="alert"></div>
+  <section id="study-empty" class="sq-card d-none" aria-live="polite">
+    <h2 class="h4">You're all caught up</h2>
+    <p class="mb-3">There are no cards due right now. Your reviewed cards will return when the scheduler says they are due.</p>
+    <a class="btn btn-sq btn-sq-outline" href="/student/dashboard">Back to learning</a>
+  </section>
+  <section id="study-panel" class="d-none">
+    <button id="flashcard" class="sq-card study-card w-100 text-start" type="button" aria-expanded="false">
+      <span class="text-uppercase small text-secondary mb-2" id="card-topic"></span>
+      <span class="h3 mb-3" id="card-front"></span>
+      <span class="small text-secondary" id="reveal-hint">Tap or press Enter to reveal the answer</span>
+      <span class="study-answer h5 mt-3 d-none" id="card-back"></span>
+      <span class="study-answer small mt-2 d-none" id="card-explanation"></span>
+    </button>
+    <p class="small text-secondary mt-2" id="card-module"></p>
+    <div id="rating-panel" class="d-none">
+      <p class="fw-semibold">How well did you remember it?</p>
+      <div class="rating-actions">
+        {% for rating in ["Again", "Hard", "Good", "Easy"] %}
+        <button class="btn btn-sq {% if rating == 'Again' %}btn-sq-outline{% else %}btn-sq-primary{% endif %}" type="button" data-rating="{{ rating }}">{{ rating }}</button>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+  <div id="study-loading" class="sq-card" role="status">Loading your due cards…</div>
+</main>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    var moduleId = {{ module_id|tojson }};
+    var queueUrl = '/student/study/queue' + (moduleId ? '?module_id=' + encodeURIComponent(moduleId) : '');
+    var cards = [];
+    var cardIndex = 0;
+    var cardButton = document.getElementById('flashcard');
+    var errorBox = document.getElementById('study-error');
+    var loading = document.getElementById('study-loading');
+    var panel = document.getElementById('study-panel');
+    var empty = document.getElementById('study-empty');
+
+    function showError(message) {
+      errorBox.textContent = message;
+      errorBox.classList.remove('d-none');
+    }
+
+    function renderCard() {
+      var card = cards[cardIndex];
+      if (!card) {
+        panel.classList.add('d-none');
+        empty.classList.remove('d-none');
+        return;
+      }
+      cardButton.setAttribute('aria-expanded', 'false');
+      document.getElementById('card-topic').textContent = card.topic || 'Flashcard';
+      document.getElementById('card-front').textContent = card.front;
+      document.getElementById('card-back').textContent = card.back;
+      document.getElementById('card-explanation').textContent = card.explanation || '';
+      document.getElementById('card-back').classList.add('d-none');
+      document.getElementById('card-explanation').classList.add('d-none');
+      document.getElementById('reveal-hint').classList.remove('d-none');
+      document.getElementById('card-module').textContent = card.module_title;
+      document.getElementById('rating-panel').classList.add('d-none');
+    }
+
+    function loadQueue() {
+      loading.classList.remove('d-none');
+      fetch(queueUrl, { credentials: 'same-origin' })
+        .then(function (response) {
+          if (!response.ok) throw new Error(response.status === 401 ? 'Please log in to continue.' : 'Unable to load due flashcards.');
+          return response.json();
+        })
+        .then(function (data) {
+          cards = data.cards || [];
+          cardIndex = 0;
+          document.getElementById('reviewed-today').textContent = data.reviewed_today;
+          document.getElementById('remaining-count').textContent = data.remaining;
+          loading.classList.add('d-none');
+          if (cards.length) {
+            empty.classList.add('d-none');
+            panel.classList.remove('d-none');
+            renderCard();
+          } else {
+            panel.classList.add('d-none');
+            empty.classList.remove('d-none');
+          }
+        })
+        .catch(function (error) {
+          loading.classList.add('d-none');
+          showError(error.message);
+        });
+    }
+
+    cardButton.addEventListener('click', function () {
+      cardButton.setAttribute('aria-expanded', 'true');
+      document.getElementById('card-back').classList.remove('d-none');
+      document.getElementById('reveal-hint').classList.add('d-none');
+      document.getElementById('rating-panel').classList.remove('d-none');
+      if (document.getElementById('card-explanation').textContent) {
+        document.getElementById('card-explanation').classList.remove('d-none');
+      }
+    });
+
+    document.querySelectorAll('[data-rating]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var card = cards[cardIndex];
+        if (!card) return;
+        errorBox.classList.add('d-none');
+        button.disabled = true;
+        var form = new FormData();
+        form.append('rating', button.dataset.rating);
+        fetch('/student/flashcards/' + card.id + '/review', {
+          method: 'POST',
+          body: form,
+          credentials: 'same-origin'
+        })
+          .then(function (response) {
+            if (!response.ok) throw new Error('Review could not be saved. Please try again.');
+            return response.json();
+          })
+          .then(function () { loadQueue(); })
+          .catch(function (error) { showError(error.message); })
+          .finally(function () { button.disabled = false; });
+      });
+    });
+
+    loadQueue();
+  })();
+</script>
+{% endblock %}

@@ -72,21 +72,62 @@
       <form method="post" action="/admin/student-accounts/{{ account.id }}/reset-password">
         <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Reset Password</button>
       </form>
-      <form method="post" action="/admin/student-accounts/{{ account.id }}/enrollments">
-        <select class="form-select form-select-sm d-inline-block" name="course_id" required>
+      <form method="post" action="/admin/student-accounts/{{ account.id }}/enrollments" data-assignment-form>
+        <select id="assignment-course-{{ account.id }}" class="form-select form-select-sm d-inline-block" name="course_id" required data-course-select>
           <option value="">Choose course</option>
           {% for course in courses %}<option value="{{ course.id }}">{{ course.name }}</option>{% endfor %}
         </select>
-        <select class="form-select form-select-sm d-inline-block" name="module_id">
-          <option value="">Entire course</option>
-          {% for module in modules %}<option value="{{ module.id }}">{{ module.title }}</option>{% endfor %}
+        <select id="assignment-module-{{ account.id }}" class="form-select form-select-sm d-inline-block" name="module_id" data-module-select>
+          <option value="" data-course-id="">Entire course</option>
+          {% for module in modules %}<option value="{{ module.id }}" data-course-id="{{ module.course_id }}">{{ module.course.name }} · {{ module.title }}</option>{% endfor %}
         </select>
         <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Assign</button>
       </form>
     </div>
+    {% set active_assignments = assignments_by_account.get(account.id, []) %}
+    {% if active_assignments %}
+    <div class="mt-3 border-top pt-3">
+      <h3 class="h6">Active course and module assignments</h3>
+      <ul class="list-unstyled mb-0">
+        {% for assignment in active_assignments %}
+        <li class="d-flex flex-wrap justify-content-between align-items-center gap-2 py-1">
+          <span>
+            {{ assignment.course.name }}
+            {% if assignment.module %}<span class="text-secondary">· {{ assignment.module.title }}</span>
+            {% else %}<span class="text-secondary">· all modules</span>{% endif %}
+          </span>
+          <form method="post" action="/admin/student-accounts/{{ account.id }}/enrollments/{{ assignment.id }}/revoke">
+            <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Remove assignment</button>
+          </form>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
   </section>
   {% else %}
   <p class="text-secondary">No student accounts found.</p>
   {% endfor %}
 </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  document.querySelectorAll("[data-assignment-form]").forEach(function (form) {
+    var courseSelect = form.querySelector("[data-course-select]");
+    var moduleSelect = form.querySelector("[data-module-select]");
+    function filterModules() {
+      Array.from(moduleSelect.options).forEach(function (option) {
+        var matches = !option.value || option.dataset.courseId === courseSelect.value;
+        option.hidden = !matches;
+        option.disabled = !matches;
+      });
+      if (moduleSelect.selectedOptions.length && moduleSelect.selectedOptions[0].disabled) {
+        moduleSelect.value = "";
+      }
+    }
+    courseSelect.addEventListener("change", filterModules);
+    filterModules();
+  });
+</script>
 {% endblock %}

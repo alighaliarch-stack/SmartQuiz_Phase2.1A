@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}My Learning · {{ app_name }}{% endblock %}
+
+{% block extra_head %}
+<style>
+  .learning-shell { max-width: 1100px; }
+  .learning-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 1rem; }
+  .learning-section { scroll-margin-top: 1rem; }
+  .learning-meta { color: var(--sq-text-dim); font-size: .9rem; }
+  .learning-card { border: 1px solid var(--sq-glass-border); border-radius: 16px; padding: 1rem; background: rgba(255,255,255,.035); }
+  @media (max-width: 575.98px) { .learning-shell { padding-left: .75rem; padding-right: .75rem; } .learning-actions .btn { width: 100%; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<main class="container learning-shell py-4 py-md-5">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+    <div>
+      <p class="sq-eyebrow mb-2">Student learning</p>
+      <h1 class="h2 mb-1">Welcome, {{ account.full_name }}</h1>
+      <p class="learning-meta mb-0">{{ account.username }} · Student code {{ account.student_code }}</p>
+    </div>
+    <div class="learning-actions d-flex flex-wrap gap-2">
+      <a class="btn btn-sq btn-sq-primary" href="/student/study">Study due flashcards</a>
+      <form method="post" action="/student/logout"><button class="btn btn-sq btn-sq-outline" type="submit">Log out</button></form>
+    </div>
+  </div>
+
+  <section class="learning-grid mb-4" aria-label="Learning overview">
+    <div class="sq-card"><div class="icon-badge"><i class="bi bi-journal-bookmark"></i></div><div class="h3">{{ courses|length }}</div><p>Assigned courses</p></div>
+    <div class="sq-card"><div class="icon-badge"><i class="bi bi-card-text"></i></div><div class="h3">{{ due_count }}</div><p>Flashcards due now</p></div>
+    <div class="sq-card"><div class="icon-badge"><i class="bi bi-check2-circle"></i></div><div class="h3">{{ today_reviews|length }}</div><p>Reviews today</p></div>
+  </section>
+
+  <section class="learning-section mb-5" id="courses">
+    <h2 class="h3 mb-3">My courses and modules</h2>
+    {% if not module_rows %}
+      <div class="sq-card"><h3 class="h5">No published modules assigned yet</h3><p>Your teacher will add courses and publish modules here when they are ready.</p></div>
+    {% endif %}
+    {% for row in module_rows %}
+    <article class="sq-card p-4 mb-3">
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+        <div>
+          <p class="sq-eyebrow mb-2">{{ row.course.name }} · {{ row.course.code }}</p>
+          <h3 class="h4 mb-1">{{ row.module.title }}</h3>
+          <p class="mb-2">{{ row.module.description or "Learning module" }}</p>
+          {% if row.module.learning_objectives %}<p class="learning-meta">Objectives: {{ row.module.learning_objectives }}</p>{% endif %}
+        </div>
+        <a class="btn btn-sq btn-sq-primary" href="/student/study?module_id={{ row.module.id }}">Study module</a>
+      </div>
+      <div class="row g-3 mt-1">
+        <div class="col-md-6">
+          <h4 class="h6">Published teaching materials</h4>
+          {% for document in row.documents %}
+          <div class="learning-card d-flex justify-content-between align-items-center gap-2 mb-2">
+            <span>{{ document.title }} <span class="learning-meta">· {{ document.file_extension }}</span></span>
+            <a class="btn btn-sm btn-sq btn-sq-outline flex-shrink-0" href="/student/materials/{{ document.id }}">Open</a>
+          </div>
+          {% else %}<p class="learning-meta">No materials are available for this module yet.</p>{% endfor %}
+        </div>
+        <div class="col-md-6">
+          <h4 class="h6">Approved flashcards</h4>
+          {% if row.flashcards %}
+            <p class="learning-meta">{{ row.flashcards|length }} cards · {{ row.due_count }} due · {{ row.reviewed_count }} started</p>
+            <a class="btn btn-sm btn-sq btn-sq-outline" href="/student/study?module_id={{ row.module.id }}">Open flashcard study</a>
+          {% else %}<p class="learning-meta">No approved flashcards are available yet.</p>{% endif %}
+        </div>
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+
+  <section class="learning-section mb-5" id="quizzes">
+    <h2 class="h3 mb-3">Available quizzes</h2>
+    {% if live_quizzes %}
+      <div class="learning-grid">
+      {% for quiz in live_quizzes %}
+        <article class="sq-card"><div class="icon-badge"><i class="bi bi-patch-question"></i></div><h3 class="h5">{{ quiz.title }}</h3><p class="mb-3">{{ quiz.description or "A live quiz is available." }}</p><a class="btn btn-sq btn-sq-outline mt-3" href="/join">Join available quiz</a></article>
+      {% endfor %}
+      </div>
+    {% else %}
+      <div class="sq-card"><p class="mb-0">There are no live quizzes right now. Check back when your teacher opens one.</p></div>
+    {% endif %}
+  </section>
+
+  <section class="learning-section" id="progress">
+    <h2 class="h3 mb-3">My recent review history</h2>
+    {% if recent_reviews %}
+      <div class="sq-card p-3 p-md-4">
+        <div class="table-responsive">
+          <table class="table table-dark table-hover align-middle mb-0">
+            <thead><tr><th scope="col">Flashcard</th><th scope="col">Rating</th><th scope="col">Reviewed</th><th scope="col">Next due</th></tr></thead>
+            <tbody>{% for review in recent_reviews %}<tr><td>{{ review.flashcard.front }}</td><td>{{ review.rating }}</td><td>{{ review.reviewed_at.strftime("%Y-%m-%d %H:%M") }}</td><td>{{ review.next_due_at.strftime("%Y-%m-%d %H:%M") }}</td></tr>{% endfor %}</tbody>
+          </table>
+        </div>
+      </div>
+    {% else %}
+      <div class="sq-card"><p class="mb-0">Your review history will appear here after you study your first flashcard.</p></div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

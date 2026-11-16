@@ -161,7 +161,7 @@ class StudentAccountTests(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertEqual(changed.status_code, 303)
-        self.assertEqual(changed.headers["location"], "/student/learning")
+        self.assertEqual(changed.headers["location"], "/student/dashboard")
         return new_password
 
     def _assign_module(self, account_id, module_id=None, course_id=None):
@@ -173,6 +173,29 @@ class StudentAccountTests(unittest.TestCase):
                 "module_id": module_id if module_id is not None else self.module_id,
             },
         )
+
+    def _logged_in_student_client(self, username, temporary_password, new_password):
+        client = TestClient(
+            smartquiz_app.app,
+            headers={"Origin": "http://testserver"},
+        )
+        login = client.post(
+            "/student/login",
+            data={"username": username, "password": temporary_password},
+            follow_redirects=False,
+        )
+        self.assertEqual(login.status_code, 303)
+        if login.headers["location"] == "/student/change-password":
+            changed = client.post(
+                "/student/change-password",
+                data={
+                    "new_password": new_password,
+                    "confirm_password": new_password,
+                },
+                follow_redirects=False,
+            )
+            self.assertEqual(changed.headers["location"], "/student/dashboard")
+        return client
 
     def test_teacher_creates_accounts_rejects_duplicate_and_searches(self):
         account, _ = self._create_account()
@@ -186,6 +209,138 @@ class StudentAccountTests(unittest.TestCase):
         self.assertIn("student.one", searched.text)
         self.assertNotIn("password_hash", searched.text)
         self.assertEqual(account["student_code"], "S-001")
+
+    def test_teacher_browser_account_forms_display_one_time_credentials(self):
+        self._teacher_login()
+        created = self.client.post(
+            "/admin/student-accounts",
+            data={
+                "username": "student.browser",
+                "student_code": "SB-001",
+                "full_name": "Browser Student",
+            },
+            headers={"Accept": "text/html"},
+        )
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.headers["cache-control"], "no-store")
+        self.assertIn("Temporary password", created.text)
+        self.assertNotIn("password_hash", created.text)
+        db = self.Session()
+        account_id = db.query(models.StudentAccount).filter_by(
+            username="student.browser"
+        ).one().id
+        db.close()
+        assigned = self.client.post(
+            f"/admin/student-accounts/{account_id}/enrollments",
+            data={"course_id": self.course_id, "module_id": self.module_id},
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        self.assertEqual(assigned.status_code, 303)
+        self.assertEqual(assigned.headers["location"], "/admin/student-accounts")
+        accounts_page = self.client.get("/admin/student-accounts")
+        self.assertIn("Browser Student", accounts_page.text)
+        reset = self.client.post(
+            f"/admin/student-accounts/{account_id}/reset-password",
+            headers={"Accept": "text/html"},
+        )
+        self.assertEqual(reset.status_code, 200)
+        self.assertEqual(reset.headers["cache-control"], "no-store")
+        self.assertIn("Temporary password reset", reset.text)
+        self.assertNotIn("password_hash", reset.text)
+
+    def test_teacher_learning_dashboard_and_course_module_management(self):
+        self.assertEqual(
+            self.client.get("/admin/learning/dashboard", follow_redirects=False).status_code,
+            303,
+        )
+        self._teacher_login()
+        dashboard = self.client.get("/admin/learning/dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("Learning dashboard", dashboard.text)
+        self.assertIn("Ancient History", dashboard.text)
+        self.assertIn("Open quiz builder", dashboard.text)
+        self.assertIn('name="viewport"', dashboard.text)
+        new_course = self.client.post(
+            "/admin/learning/courses",
+            data={"name": "Chemistry", "code": "CHEM", "description": "Basics"},
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        self.assertEqual(new_course.status_code, 303)
+        db = self.Session()
+        new_course_id = db.query(models.Course).filter_by(code="CHEM").one().id
+        db.close()
+        new_module = self.client.post(
+            "/admin/learning/modules",
+            data={"course_id": new_course_id, "title": "Atoms"},
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        self.assertEqual(new_module.status_code, 303)
+        updated_course = self.client.post(
+            f"/admin/learning/courses/{self.course_id}/edit",
+            data={"name": "Biology Advanced", "code": "BIO-2", "description": "Updated"},
+            follow_redirects=False,
+        )
+        self.assertEqual(updated_course.status_code, 303)
+        updated_module = self.client.post(
+            f"/admin/learning/modules/{self.module_id}/edit",
+            data={
+                "course_id": self.course_id,
+                "title": "Cell Structure",
+                "description": "Updated module",
+                "learning_objectives": "Explain organelles",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(updated_module.status_code, 303)
+        db = self.Session()
+        card = models.Flashcard(
+            module_id=self.module_id,
+            front="Cell prompt",
+            back="Cell answer",
+            approval_status="DRAFT",
+        )
+        question = models.GeneratedQuestion(
+            module_id=self.module_id,
+            question_text="What is a cell?",
+        )
+        db.add_all([card, question])
+        db.commit()
+        card_id = card.id
+        question_id = question.id
+        db.close()
+        self.assertEqual(
+            self.client.post(
+                f"/admin/learning/flashcards/{card_id}/status",
+                data={"status": "APPROVED"},
+                follow_redirects=False,
+            ).status_code,
+            303,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/admin/learning/questions/{question_id}/status",
+                data={"status": "REJECTED"},
+                follow_redirects=False,
+            ).status_code,
+            303,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/admin/learning/modules/{self.module_id}/status",
+                data={"status": "DRAFT"},
+                follow_redirects=False,
+            ).status_code,
+            303,
+        )
+        final_dashboard = self.client.get("/admin/learning/dashboard")
+        self.assertIn("DRAFT", final_dashboard.text)
+        self.assertIn("Cell prompt", final_dashboard.text)
+        self.assertIn("APPROVED", final_dashboard.text)
+        self.assertIn("What is a cell?", final_dashboard.text)
+        self.assertIn("REJECTED", final_dashboard.text)
 
     def test_teacher_edits_and_reactivates_student_accounts(self):
         account, _ = self._create_account()
@@ -258,7 +413,7 @@ class StudentAccountTests(unittest.TestCase):
                 data={"username": "student.one", "password": "new-student-password-2026"},
                 follow_redirects=False,
             ).headers["location"],
-            "/student/learning",
+            "/student/dashboard",
         )
         logout = self.client.post("/student/logout", follow_redirects=False)
         self.assertEqual(logout.status_code, 303)
@@ -315,7 +470,12 @@ class StudentAccountTests(unittest.TestCase):
         )
 
     def test_unauthenticated_student_routes_and_teacher_routes_are_rejected(self):
+        self.assertEqual(self.client.get("/student/dashboard").status_code, 401)
         self.assertEqual(self.client.get("/student/learning").status_code, 401)
+        self.assertEqual(self.client.get("/student/study").status_code, 401)
+        self.assertEqual(self.client.get("/student/study/queue").status_code, 401)
+        self.assertEqual(self.client.get("/student/study/history").status_code, 401)
+        self.assertEqual(self.client.get("/student/materials/1").status_code, 401)
         self.assertEqual(self.client.get("/student/flashcards").status_code, 401)
         self.assertEqual(self.client.get("/student/flashcards/1/reviews").status_code, 401)
         self.assertEqual(
@@ -427,7 +587,7 @@ class StudentAccountTests(unittest.TestCase):
             data={"username": "student.one", "password": "new-student-password-2026"},
             follow_redirects=False,
         )
-        self.assertEqual(second_login.headers["location"], "/student/learning")
+        self.assertEqual(second_login.headers["location"], "/student/dashboard")
         previous_cookie = self.client.cookies.get("session")
 
         changed = self.client.post(
@@ -456,7 +616,7 @@ class StudentAccountTests(unittest.TestCase):
                 data={"username": "student.one", "password": "new-student-password-2026"},
                 follow_redirects=False,
             ).headers["location"],
-            "/student/learning",
+            "/student/dashboard",
         )
         self._teacher_login()
         self.client.post(f"/admin/student-accounts/{account['id']}/reset-password")
@@ -496,7 +656,7 @@ class StudentAccountTests(unittest.TestCase):
                 data={"username": "student.one", "password": "new-student-password-2026"},
                 follow_redirects=False,
             ).headers["location"],
-            "/student/learning",
+            "/student/dashboard",
         )
         joined = student_client.post(
             "/join",
@@ -601,7 +761,7 @@ class StudentAccountTests(unittest.TestCase):
             data={"username": "student.one", "password": "new-student-password-2026"},
             follow_redirects=False,
         )
-        self.assertEqual(login.headers["location"], "/student/learning")
+        self.assertEqual(login.headers["location"], "/student/dashboard")
         home = self.client.get("/student/learning").json()
         self.assertEqual([row["id"] for row in home["modules"]], [self.module_id])
         cards = self.client.get("/student/flashcards").json()["cards"]
@@ -625,6 +785,131 @@ class StudentAccountTests(unittest.TestCase):
             ).status_code,
             400,
         )
+
+    def test_student_dashboard_scopes_assigned_course_and_materials(self):
+        first_account, first_temp = self._create_account()
+        second_response = self.client.post(
+            "/admin/student-accounts",
+            data={"username": "student.two", "student_code": "S-002", "full_name": "Student Two"},
+        )
+        second_account = second_response.json()["account"]
+        second_temp = second_response.json()["temporary_password"]
+        self.assertEqual(self._assign_module(first_account["id"]).status_code, 201)
+        db = self.Session()
+        document = models.Document(
+            course_id=self.course_id,
+            module_id=self.module_id,
+            title="Cell notes",
+            original_filename="cell-notes.txt",
+            storage_filename="phase3-test-cell-notes.txt",
+            mime_type="text/plain",
+            file_extension=".txt",
+            file_size_bytes=19,
+            extraction_status="COMPLETE",
+            extracted_text="Cell notes content",
+        )
+        db.add(document)
+        db.commit()
+        document_id = document.id
+        db.close()
+        material_path = smartquiz_app.LEARNING_UPLOADS_DIR / "phase3-test-cell-notes.txt"
+        material_path.write_text("Cell notes content", encoding="utf-8")
+        try:
+            first_client = self._logged_in_student_client(
+                "student.one", first_temp, "student-one-password-2026"
+            )
+            first_dashboard = first_client.get("/student/dashboard")
+            self.assertEqual(first_dashboard.status_code, 200)
+            self.assertIn("Biology", first_dashboard.text)
+            self.assertIn("Cells", first_dashboard.text)
+            self.assertIn("Cell notes", first_dashboard.text)
+            self.assertNotIn("password_hash", first_dashboard.text)
+            self.assertIn("name=\"viewport\"", first_dashboard.text)
+            material = first_client.get(f"/student/materials/{document_id}")
+            self.assertEqual(material.content, b"Cell notes content")
+            self.assertIn("inline", material.headers["content-disposition"])
+            second_client = self._logged_in_student_client(
+                "student.two", second_temp, "student-two-password-2026"
+            )
+            second_dashboard = second_client.get("/student/dashboard")
+            self.assertEqual(second_dashboard.status_code, 200)
+            self.assertNotIn("Cells", second_dashboard.text)
+            self.assertNotIn("Cell notes", second_dashboard.text)
+            self.assertEqual(
+                second_client.get(f"/student/materials/{document_id}").status_code,
+                404,
+            )
+        finally:
+            material_path.unlink(missing_ok=True)
+
+    def test_student_flashcard_study_queue_review_history_and_isolation(self):
+        first_account, first_temp = self._create_account()
+        second_response = self.client.post(
+            "/admin/student-accounts",
+            data={"username": "student.two", "student_code": "S-002", "full_name": "Student Two"},
+        )
+        second_temp = second_response.json()["temporary_password"]
+        self.assertEqual(self._assign_module(first_account["id"]).status_code, 201)
+        db = self.Session()
+        cards = [
+            models.Flashcard(
+                module_id=self.module_id,
+                front=f"Prompt {index}",
+                back=f"Answer {index}",
+                explanation="Explanation",
+                topic="Cells",
+                approval_status="APPROVED",
+            )
+            for index in range(2)
+        ]
+        hidden = models.Flashcard(
+            module_id=self.module_id,
+            front="Unapproved prompt",
+            back="Unapproved answer",
+            approval_status="DRAFT",
+        )
+        db.add_all([*cards, hidden])
+        db.commit()
+        card_ids = [card.id for card in cards]
+        db.close()
+
+        first_client = self._logged_in_student_client(
+            "student.one", first_temp, "student-one-password-2026"
+        )
+        study_page = first_client.get("/student/study?module_id=" + str(self.module_id))
+        self.assertEqual(study_page.status_code, 200)
+        self.assertIn("@media (max-width: 575.98px)", study_page.text)
+        queue = first_client.get(f"/student/study/queue?module_id={self.module_id}").json()
+        self.assertEqual(queue["remaining"], 2)
+        self.assertEqual(queue["reviewed_today"], 0)
+        reviewed = first_client.post(
+            f"/student/flashcards/{card_ids[0]}/review",
+            data={"rating": "Again"},
+        )
+        self.assertEqual(reviewed.status_code, 200)
+        next_queue = first_client.get(f"/student/study/queue?module_id={self.module_id}").json()
+        self.assertEqual(next_queue["remaining"], 1)
+        self.assertEqual(next_queue["cards"][0]["id"], card_ids[1])
+        self.assertEqual(next_queue["reviewed_today"], 1)
+        history = first_client.get(f"/student/study/history?module_id={self.module_id}").json()
+        self.assertEqual(len(history["reviews"]), 1)
+        self.assertEqual(history["reviews"][0]["rating"], "Again")
+        self.assertEqual(
+            first_client.get(f"/student/flashcards/{card_ids[0]}/reviews").json()["reviews"][0]["rating"],
+            "Again",
+        )
+
+        second_client = self._logged_in_student_client(
+            "student.two", second_temp, "student-two-password-2026"
+        )
+        self.assertEqual(second_client.get("/student/study/queue").json()["remaining"], 0)
+        self.assertEqual(second_client.get("/student/study/history").json()["reviews"], [])
+        self.assertEqual(second_client.get(f"/student/study?module_id={self.module_id}").status_code, 404)
+        teacher_dashboard = self.client.get("/admin/learning/dashboard")
+        self.assertIn("Student progress", teacher_dashboard.text)
+        self.assertIn("Student One", teacher_dashboard.text)
+        self.assertIn("1 / 2", teacher_dashboard.text)
+        self.assertNotIn("Student Two", teacher_dashboard.text)
 
     def test_assigned_but_unpublished_module_is_not_accessible(self):
         account, temporary = self._create_account()

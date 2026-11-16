@@ -46,7 +46,7 @@ load_dotenv()
 
 import qrcode
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func
@@ -494,6 +494,110 @@ def _get_student_flashcard_or_404(
     return flashcard
 
 
+def _student_dashboard_data(db: Session, account: StudentAccount) -> dict:
+    modules = _get_assigned_published_modules(db, account.id)
+    module_ids = [module.id for module in modules]
+    course_ids = sorted({module.course_id for module in modules})
+    courses = (
+        db.query(Course)
+        .filter(Course.id.in_(course_ids))
+        .order_by(Course.name)
+        .all()
+        if course_ids else []
+    )
+    module_rows = []
+    visible_flashcard_ids: set[int] = set()
+    for module in modules:
+        documents = (
+            db.query(Document)
+            .filter(Document.module_id == module.id, Document.is_archived.is_(False))
+            .order_by(Document.title)
+            .all()
+        )
+        flashcards = (
+            db.query(Flashcard)
+            .filter(
+                Flashcard.module_id == module.id,
+                Flashcard.approval_status == "APPROVED",
+            )
+            .order_by(Flashcard.id)
+            .all()
+        )
+        visible_flashcard_ids.update(card.id for card in flashcards)
+        progress_rows = (
+            db.query(StudentAccountFlashcardProgress)
+            .filter(
+                StudentAccountFlashcardProgress.account_id == account.id,
+                StudentAccountFlashcardProgress.flashcard_id.in_([card.id for card in flashcards]),
+            )
+            .all()
+            if flashcards else []
+        )
+        progress_by_card = {item.flashcard_id: item for item in progress_rows}
+        module_rows.append({
+            "module": module,
+            "course": module.course,
+            "documents": documents,
+            "flashcards": flashcards,
+            "reviewed_count": sum(
+                1 for card in flashcards
+                if progress_by_card.get(card.id) and progress_by_card[card.id].review_count
+            ),
+            "due_count": sum(
+                1 for card in flashcards
+                if not progress_by_card.get(card.id)
+                or _is_due(progress_by_card[card.id].due_at)
+            ),
+        })
+
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    today_reviews = (
+        db.query(StudentAccountFlashcardReview)
+        .filter(
+            StudentAccountFlashcardReview.account_id == account.id,
+            StudentAccountFlashcardReview.reviewed_at >= today_start,
+            StudentAccountFlashcardReview.flashcard_id.in_(visible_flashcard_ids),
+        )
+        .order_by(StudentAccountFlashcardReview.reviewed_at.desc())
+        .all()
+        if visible_flashcard_ids else []
+    )
+    recent_reviews = (
+        db.query(StudentAccountFlashcardReview)
+        .filter(
+            StudentAccountFlashcardReview.account_id == account.id,
+            StudentAccountFlashcardReview.flashcard_id.in_(visible_flashcard_ids),
+        )
+        .order_by(StudentAccountFlashcardReview.reviewed_at.desc())
+        .limit(10)
+        .all()
+        if visible_flashcard_ids else []
+    )
+    live_quizzes = (
+        db.query(Quiz)
+        .filter(Quiz.status == "Live")
+        .order_by(Quiz.title)
+        .all()
+    )
+    return {
+        "account": account,
+        "courses": courses,
+        "module_rows": module_rows,
+        "live_quizzes": live_quizzes,
+        "today_reviews": today_reviews,
+        "recent_reviews": recent_reviews,
+        "due_count": sum(row["due_count"] for row in module_rows),
+    }
+
+
+def _is_due(due_at: datetime) -> bool:
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=timezone.utc)
+    return due_at <= datetime.now(timezone.utc)
+
+
 @app.get("/student/login")
 def student_login_page(request: Request, error: str | None = None):
     return templates.TemplateResponse(
@@ -540,7 +644,7 @@ def student_login_submit(
     auth.log_in_student(request, account.id, account.session_version)
     if account.must_change_password:
         return RedirectResponse(url="/student/change-password", status_code=303)
-    return RedirectResponse(url="/student/learning", status_code=303)
+    return RedirectResponse(url="/student/dashboard", status_code=303)
 
 
 @app.post("/student/logout")
@@ -588,7 +692,7 @@ def student_change_password_submit(
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
     auth.log_in_student(request, account.id, account.session_version)
-    return RedirectResponse(url="/student/learning", status_code=303)
+    return RedirectResponse(url="/student/dashboard", status_code=303)
 
 
 @app.get("/student/learning")
@@ -607,6 +711,189 @@ def student_learning_home(request: Request, db: Session = Depends(get_db)):
             }
             for module in modules
         ],
+    })
+
+
+@app.get("/student/dashboard")
+def student_dashboard(request: Request, db: Session = Depends(get_db)):
+    account = _get_authenticated_student_account(request, db)
+    return templates.TemplateResponse(
+        request=request,
+        name="student_dashboard.html",
+        context={
+            "app_name": settings.APP_NAME,
+            **_student_dashboard_data(db, account),
+        },
+    )
+
+
+@app.get("/student/materials/{document_id}")
+def student_learning_material(
+    document_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    account = _get_authenticated_student_account(request, db)
+    document = (
+        db.query(Document)
+        .join(LearningModule, LearningModule.id == Document.module_id)
+        .filter(
+            Document.id == document_id,
+            Document.is_archived.is_(False),
+            LearningModule.status == "PUBLISHED",
+        )
+        .first()
+    )
+    if document is None or not _module_access_allowed(db, account.id, document.module):
+        raise HTTPException(status_code=404, detail="Learning material not found.")
+    root = LEARNING_UPLOADS_DIR.resolve()
+    path = (root / document.storage_filename).resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(status_code=404, detail="Learning material not found.")
+    return FileResponse(
+        path,
+        media_type=document.mime_type,
+        filename=Path(document.original_filename).name,
+        content_disposition_type="inline",
+    )
+
+
+@app.get("/student/study")
+def student_flashcard_study_page(
+    request: Request,
+    module_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    account = _get_authenticated_student_account(request, db)
+    modules = (
+        [_get_student_module_or_404(db, account.id, module_id)]
+        if module_id is not None
+        else _get_assigned_published_modules(db, account.id)
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="student_flashcard_study.html",
+        context={
+            "app_name": settings.APP_NAME,
+            "module_id": module_id,
+            "module_title": modules[0].title if module_id is not None else "All assigned modules",
+        },
+    )
+
+
+@app.get("/student/study/queue")
+def student_flashcard_queue(
+    request: Request,
+    module_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    account = _get_authenticated_student_account(request, db)
+    modules = (
+        [_get_student_module_or_404(db, account.id, module_id)]
+        if module_id is not None
+        else _get_assigned_published_modules(db, account.id)
+    )
+    cards = []
+    for module in modules:
+        for flashcard in (
+            db.query(Flashcard)
+            .filter(
+                Flashcard.module_id == module.id,
+                Flashcard.approval_status == "APPROVED",
+            )
+            .order_by(Flashcard.id)
+            .all()
+        ):
+            progress = (
+                db.query(StudentAccountFlashcardProgress)
+                .filter(
+                    StudentAccountFlashcardProgress.account_id == account.id,
+                    StudentAccountFlashcardProgress.flashcard_id == flashcard.id,
+                )
+                .first()
+            )
+            due_at = progress.due_at if progress else datetime.now(timezone.utc)
+            if _is_due(due_at):
+                cards.append({
+                    "id": flashcard.id,
+                    "module_id": module.id,
+                    "module_title": module.title,
+                    "front": flashcard.front,
+                    "back": flashcard.back,
+                    "explanation": flashcard.explanation,
+                    "topic": flashcard.topic,
+                })
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    # Include reviewed cards in the daily count even when their next due
+    # date has moved beyond today.
+    module_ids = [module.id for module in modules]
+    all_visible_card_ids = (
+        db.query(Flashcard.id)
+        .filter(
+            Flashcard.module_id.in_(module_ids),
+            Flashcard.approval_status == "APPROVED",
+        )
+        .all()
+        if module_ids else []
+    )
+    all_card_ids = [item[0] for item in all_visible_card_ids]
+    reviewed_today = (
+        db.query(StudentAccountFlashcardReview)
+        .filter(
+            StudentAccountFlashcardReview.account_id == account.id,
+            StudentAccountFlashcardReview.reviewed_at >= today_start,
+            StudentAccountFlashcardReview.flashcard_id.in_(all_card_ids),
+        )
+        .count()
+        if all_card_ids else 0
+    )
+    return JSONResponse({
+        "cards": cards,
+        "remaining": len(cards),
+        "reviewed_today": reviewed_today,
+        "module_id": module_id,
+    })
+
+
+@app.get("/student/study/history")
+def student_flashcard_history(
+    request: Request,
+    module_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    account = _get_authenticated_student_account(request, db)
+    modules = (
+        [_get_student_module_or_404(db, account.id, module_id)]
+        if module_id is not None
+        else _get_assigned_published_modules(db, account.id)
+    )
+    module_ids = [module.id for module in modules]
+    rows = (
+        db.query(StudentAccountFlashcardReview, Flashcard)
+        .join(Flashcard, Flashcard.id == StudentAccountFlashcardReview.flashcard_id)
+        .filter(
+            StudentAccountFlashcardReview.account_id == account.id,
+            Flashcard.module_id.in_(module_ids),
+            Flashcard.approval_status == "APPROVED",
+        )
+        .order_by(StudentAccountFlashcardReview.reviewed_at.desc())
+        .limit(50)
+        .all()
+        if module_ids else []
+    )
+    return JSONResponse({
+        "reviews": [
+            {
+                "flashcard_id": flashcard.id,
+                "front": flashcard.front,
+                "rating": review.rating,
+                "reviewed_at": review.reviewed_at.isoformat(),
+                "next_due_at": review.next_due_at.isoformat(),
+            }
+            for review, flashcard in rows
+        ]
     })
 
 
@@ -635,6 +922,19 @@ def admin_student_accounts_page(
     accounts = query.order_by(StudentAccount.full_name, StudentAccount.id).all()
     courses = db.query(Course).order_by(Course.name).all()
     modules = db.query(LearningModule).order_by(LearningModule.title).all()
+    enrollments = (
+        db.query(StudentAccountEnrollment)
+        .filter(
+            StudentAccountEnrollment.account_id.in_([account.id for account in accounts]),
+            StudentAccountEnrollment.status == "Active",
+        )
+        .order_by(StudentAccountEnrollment.assigned_at.desc())
+        .all()
+        if accounts else []
+    )
+    assignments_by_account: dict[int, list[StudentAccountEnrollment]] = {}
+    for enrollment in enrollments:
+        assignments_by_account.setdefault(enrollment.account_id, []).append(enrollment)
     return templates.TemplateResponse(
         request=request,
         name="student_accounts.html",
@@ -644,6 +944,7 @@ def admin_student_accounts_page(
             "accounts": accounts,
             "courses": courses,
             "modules": modules,
+            "assignments_by_account": assignments_by_account,
             "search": search,
         },
     )
@@ -651,6 +952,7 @@ def admin_student_accounts_page(
 
 @app.post("/admin/student-accounts")
 def admin_create_student_account(
+    request: Request,
     username: str = Form(...),
     student_code: str = Form(...),
     full_name: str = Form(...),
@@ -688,16 +990,29 @@ def admin_create_student_account(
         db.rollback()
         raise HTTPException(status_code=409, detail="Username or student code already exists.")
     db.refresh(account)
+    account_data = {
+        "id": account.id,
+        "username": account.username,
+        "student_code": account.student_code,
+        "full_name": account.full_name,
+        "must_change_password": account.must_change_password,
+    }
+    if "text/html" in request.headers.get("accept", ""):
+        return templates.TemplateResponse(
+            request=request,
+            name="student_credential_result.html",
+            context={
+                "app_name": settings.APP_NAME,
+                "title": "Student account created",
+                "account": account_data,
+                "temporary_password": temporary_password,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
     return JSONResponse(
         {
             "status": "created",
-            "account": {
-                "id": account.id,
-                "username": account.username,
-                "student_code": account.student_code,
-                "full_name": account.full_name,
-                "must_change_password": account.must_change_password,
-            },
+            "account": account_data,
             "temporary_password": temporary_password,
         },
         status_code=201,
@@ -706,6 +1021,7 @@ def admin_create_student_account(
 
 @app.post("/admin/student-accounts/{account_id}/edit")
 def admin_edit_student_account(
+    request: Request,
     account_id: int,
     username: str = Form(...),
     student_code: str = Form(...),
@@ -733,11 +1049,14 @@ def admin_edit_student_account(
     account.full_name = clean_name
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/student-accounts", status_code=303)
     return JSONResponse({"status": "updated", "account_id": account.id})
 
 
 @app.post("/admin/student-accounts/{account_id}/status")
 def admin_set_student_account_status(
+    request: Request,
     account_id: int,
     active: bool = Form(...),
     db: Session = Depends(get_db),
@@ -750,11 +1069,17 @@ def admin_set_student_account_status(
         account.session_version += 1
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/student-accounts", status_code=303)
     return JSONResponse({"status": "updated", "account_id": account.id, "is_active": account.is_active})
 
 
 @app.post("/admin/student-accounts/{account_id}/reset-password")
-def admin_reset_student_password(account_id: int, db: Session = Depends(get_db)):
+def admin_reset_student_password(
+    request: Request,
+    account_id: int,
+    db: Session = Depends(get_db),
+):
     account = db.query(StudentAccount).filter(StudentAccount.id == account_id).first()
     if account is None:
         raise HTTPException(status_code=404, detail="Student account not found.")
@@ -764,11 +1089,29 @@ def admin_reset_student_password(account_id: int, db: Session = Depends(get_db))
     account.session_version += 1
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
+    if "text/html" in request.headers.get("accept", ""):
+        return templates.TemplateResponse(
+            request=request,
+            name="student_credential_result.html",
+            context={
+                "app_name": settings.APP_NAME,
+                "title": "Temporary password reset",
+                "account": {
+                    "id": account.id,
+                    "username": account.username,
+                    "student_code": account.student_code,
+                    "full_name": account.full_name,
+                },
+                "temporary_password": temporary_password,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
     return JSONResponse({"status": "reset", "account_id": account.id, "temporary_password": temporary_password})
 
 
 @app.post("/admin/student-accounts/{account_id}/enrollments")
 def admin_assign_student_course(
+    request: Request,
     account_id: int,
     course_id: int = Form(...),
     module_id: int | None = Form(None),
@@ -804,11 +1147,14 @@ def admin_assign_student_course(
     db.add(enrollment)
     db.commit()
     db.refresh(enrollment)
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/student-accounts", status_code=303)
     return JSONResponse({"status": "assigned", "enrollment_id": enrollment.id}, status_code=201)
 
 
 @app.post("/admin/student-accounts/{account_id}/enrollments/{enrollment_id}/revoke")
 def admin_revoke_student_assignment(
+    request: Request,
     account_id: int,
     enrollment_id: int,
     db: Session = Depends(get_db),
@@ -821,7 +1167,215 @@ def admin_revoke_student_assignment(
         raise HTTPException(status_code=404, detail="Assignment not found.")
     enrollment.status = "Revoked"
     db.commit()
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/student-accounts", status_code=303)
     return JSONResponse({"status": "revoked", "enrollment_id": enrollment.id})
+
+
+@app.get("/admin/learning/dashboard")
+def admin_learning_dashboard_page(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    courses = db.query(Course).order_by(Course.name).all()
+    modules = db.query(LearningModule).order_by(LearningModule.title).all()
+    module_rows = []
+    for module in modules:
+        approved_flashcards = (
+            db.query(Flashcard)
+            .filter(
+                Flashcard.module_id == module.id,
+                Flashcard.approval_status == "APPROVED",
+            )
+            .all()
+        )
+        approved_flashcard_ids = [card.id for card in approved_flashcards]
+        active_assignments = (
+            db.query(StudentAccountEnrollment, StudentAccount)
+            .join(StudentAccount, StudentAccount.id == StudentAccountEnrollment.account_id)
+            .filter(
+                StudentAccountEnrollment.course_id == module.course_id,
+                StudentAccountEnrollment.status == "Active",
+                (StudentAccountEnrollment.expires_at.is_(None))
+                | (StudentAccountEnrollment.expires_at > datetime.now(timezone.utc)),
+                StudentAccount.is_active.is_(True),
+                (StudentAccountEnrollment.module_id.is_(None))
+                | (StudentAccountEnrollment.module_id == module.id),
+            )
+            .all()
+        )
+        progress_rows = []
+        seen_account_ids: set[int] = set()
+        for _, account in active_assignments:
+            if account.id in seen_account_ids:
+                continue
+            seen_account_ids.add(account.id)
+            progress = (
+                db.query(StudentAccountFlashcardProgress)
+                .filter(
+                    StudentAccountFlashcardProgress.account_id == account.id,
+                    StudentAccountFlashcardProgress.flashcard_id.in_(approved_flashcard_ids),
+                )
+                .all()
+                if approved_flashcard_ids else []
+            )
+            latest_review = (
+                db.query(StudentAccountFlashcardReview)
+                .filter(
+                    StudentAccountFlashcardReview.account_id == account.id,
+                    StudentAccountFlashcardReview.flashcard_id.in_(approved_flashcard_ids),
+                )
+                .order_by(StudentAccountFlashcardReview.reviewed_at.desc())
+                .first()
+                if approved_flashcard_ids else None
+            )
+            progress_rows.append({
+                "account": account,
+                "reviewed_count": sum(1 for item in progress if item.review_count > 0),
+                "due_count": sum(1 for item in progress if _is_due(item.due_at)),
+                "review_count": sum(item.review_count for item in progress),
+                "last_reviewed_at": latest_review.reviewed_at if latest_review else None,
+            })
+        module_rows.append({
+            "module": module,
+            "documents": (
+                db.query(Document)
+                .filter(Document.module_id == module.id, Document.is_archived.is_(False))
+                .order_by(Document.created_at.desc())
+                .all()
+            ),
+            "flashcards": (
+                db.query(Flashcard)
+                .filter(Flashcard.module_id == module.id)
+                .order_by(Flashcard.id)
+                .all()
+            ),
+            "progress_rows": progress_rows,
+            "questions": (
+                db.query(GeneratedQuestion)
+                .filter(GeneratedQuestion.module_id == module.id)
+                .order_by(GeneratedQuestion.id)
+                .all()
+            ),
+        })
+    return templates.TemplateResponse(
+        request=request,
+        name="teacher_learning_dashboard.html",
+        context={
+            "app_name": settings.APP_NAME,
+            "active_page": "learning",
+            "courses": courses,
+            "modules": modules,
+            "module_rows": module_rows,
+        },
+    )
+
+
+@app.post("/admin/learning/courses/{course_id}/edit")
+def admin_edit_course(
+    course_id: int,
+    name: str = Form(...),
+    code: str = Form(...),
+    description: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if course is None:
+        raise HTTPException(status_code=404, detail="Course not found.")
+    clean_name = name.strip()
+    clean_code = code.strip()
+    if not clean_name or len(clean_name) > 200 or not clean_code or len(clean_code) > 50:
+        raise HTTPException(status_code=400, detail="Course name or code is invalid.")
+    duplicate = db.query(Course.id).filter(
+        Course.id != course.id,
+        Course.code == clean_code,
+    ).first()
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Course code must be unique.")
+    course.name = clean_name
+    course.code = clean_code
+    course.description = description.strip()
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/modules/{module_id}/edit")
+def admin_edit_learning_module(
+    module_id: int,
+    course_id: int = Form(...),
+    title: str = Form(...),
+    description: str = Form(""),
+    learning_objectives: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    module = db.query(LearningModule).filter(LearningModule.id == module_id).first()
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if module is None or course is None:
+        raise HTTPException(status_code=404, detail="Module or course not found.")
+    clean_title = title.strip()
+    if not clean_title or len(clean_title) > 200:
+        raise HTTPException(status_code=400, detail="Module title is invalid.")
+    module.course_id = course.id
+    module.title = clean_title
+    module.description = description.strip()
+    module.learning_objectives = learning_objectives.strip()
+    db.query(Document).filter(Document.module_id == module.id).update(
+        {Document.course_id: course.id},
+        synchronize_session=False,
+    )
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/modules/{module_id}/status")
+def admin_set_learning_module_status(
+    module_id: int,
+    status: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    module = db.query(LearningModule).filter(LearningModule.id == module_id).first()
+    if module is None:
+        raise HTTPException(status_code=404, detail="Module not found.")
+    clean_status = status.strip().upper()
+    if clean_status not in {"DRAFT", "PUBLISHED"}:
+        raise HTTPException(status_code=400, detail="Module status must be DRAFT or PUBLISHED.")
+    module.status = clean_status
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/flashcards/{flashcard_id}/status")
+def admin_set_flashcard_status(
+    flashcard_id: int,
+    status: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    flashcard = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
+    if flashcard is None:
+        raise HTTPException(status_code=404, detail="Flashcard not found.")
+    clean_status = status.strip().upper()
+    if clean_status not in {"DRAFT", "APPROVED", "REJECTED"}:
+        raise HTTPException(status_code=400, detail="Invalid flashcard approval status.")
+    flashcard.approval_status = clean_status
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/questions/{question_id}/status")
+def admin_set_generated_question_status(
+    question_id: int,
+    status: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    question = db.query(GeneratedQuestion).filter(GeneratedQuestion.id == question_id).first()
+    if question is None:
+        raise HTTPException(status_code=404, detail="Generated question not found.")
+    clean_status = status.strip().upper()
+    if clean_status not in {"DRAFT", "APPROVED", "REJECTED"}:
+        raise HTTPException(status_code=400, detail="Invalid question approval status.")
+    question.approval_status = clean_status
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
 
 
 @app.post("/admin/learning/modules/{module_id}/publish")
@@ -864,6 +1418,7 @@ async def admin_learning_dashboard(db: Session = Depends(get_db)):
 
 @app.post("/admin/learning/courses")
 async def admin_create_course(
+    request: Request,
     name: str = Form(...),
     code: str = Form(...),
     description: str = Form(""),
@@ -879,11 +1434,14 @@ async def admin_create_course(
     db.add(course)
     db.commit()
     db.refresh(course)
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
     return JSONResponse({"status": "ok", "course": {"id": course.id, "name": course.name, "code": course.code}})
 
 
 @app.post("/admin/learning/modules")
 async def admin_create_module(
+    request: Request,
     course_id: int = Form(...),
     title: str = Form(...),
     description: str = Form(""),
@@ -905,11 +1463,14 @@ async def admin_create_module(
     db.add(module)
     db.commit()
     db.refresh(module)
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
     return JSONResponse({"status": "ok", "module": {"id": module.id, "title": module.title, "course_id": module.course_id}})
 
 
 @app.post("/admin/learning/modules/{module_id}/documents/upload")
 async def admin_upload_document(
+    request: Request,
     module_id: int,
     file: UploadFile = File(...),
     title: str = Form(""),
@@ -968,7 +1529,7 @@ async def admin_upload_document(
     )
     db.add(version)
     db.commit()
-    return JSONResponse({
+    response_body = {
         "status": "ok",
         "document": {
             "id": document.id,
@@ -977,7 +1538,10 @@ async def admin_upload_document(
             "extraction_status": document.extraction_status,
             "extraction_error": document.extraction_error,
         },
-    })
+    }
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return JSONResponse(response_body)
 
 
 @app.get("/admin/learning/modules/{module_id}/documents")

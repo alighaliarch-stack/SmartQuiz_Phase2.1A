@@ -1,0 +1,149 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Learning · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+    <div>
+      <p class="text-uppercase small mb-1 text-secondary">Teacher workspace</p>
+      <h1 class="h2 mb-0">Learning dashboard</h1>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sq btn-sq-outline" href="/admin/student-accounts">Manage students</a>
+      <a class="btn btn-sq btn-sq-primary" href="/admin/quizzes/new">Open quiz builder</a>
+    </div>
+  </div>
+
+  <section class="sq-card p-4 mb-4">
+    <h2 class="h4">Create a course</h2>
+    <form method="post" action="/admin/learning/courses" class="row g-3">
+      <div class="col-md-4"><label class="form-label" for="course-name">Course name</label><input id="course-name" class="form-control" name="name" maxlength="200" required></div>
+      <div class="col-md-3"><label class="form-label" for="course-code">Course code</label><input id="course-code" class="form-control" name="code" maxlength="50" required></div>
+      <div class="col-md-5"><label class="form-label" for="course-description">Description</label><input id="course-description" class="form-control" name="description"></div>
+      <div class="col-12"><button class="btn btn-sq btn-sq-primary" type="submit">Create course</button></div>
+    </form>
+  </section>
+
+  <section class="sq-card p-4 mb-4">
+    <h2 class="h4">Create a module</h2>
+    <form method="post" action="/admin/learning/modules" class="row g-3">
+      <div class="col-md-4"><label class="form-label" for="module-course">Course</label>
+        <select id="module-course" class="form-select" name="course_id" required>
+          <option value="">Choose a course</option>
+          {% for course in courses %}<option value="{{ course.id }}">{{ course.name }} ({{ course.code }})</option>{% endfor %}
+        </select>
+      </div>
+      <div class="col-md-4"><label class="form-label" for="module-title">Module title</label><input id="module-title" class="form-control" name="title" maxlength="200" required></div>
+      <div class="col-md-4"><label class="form-label" for="module-description">Description</label><input id="module-description" class="form-control" name="description"></div>
+      <div class="col-12"><label class="form-label" for="module-objectives">Learning objectives</label><textarea id="module-objectives" class="form-control" name="learning_objectives" rows="2"></textarea></div>
+      <div class="col-12"><button class="btn btn-sq btn-sq-primary" type="submit">Create draft module</button></div>
+    </form>
+  </section>
+
+  <h2 class="h3 mb-3">Courses and modules</h2>
+  {% for course in courses %}
+  <section class="sq-card p-4 mb-4">
+    <form method="post" action="/admin/learning/courses/{{ course.id }}/edit" class="row g-2 align-items-end mb-4">
+      <div class="col-md-4"><label class="form-label">Course name</label><input class="form-control" name="name" value="{{ course.name }}" maxlength="200" required></div>
+      <div class="col-md-3"><label class="form-label">Code</label><input class="form-control" name="code" value="{{ course.code }}" maxlength="50" required></div>
+      <div class="col-md-4"><label class="form-label">Description</label><input class="form-control" name="description" value="{{ course.description }}"></div>
+      <div class="col-md-1"><button class="btn btn-sq btn-sq-outline w-100" type="submit">Save</button></div>
+    </form>
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top pt-3">
+      <h3 class="h5 mb-0">{{ course.name }} <span class="text-secondary">· {{ course.code }}</span></h3>
+      <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/student-accounts">Assign students</a>
+    </div>
+    {% set course_module_count = namespace(value=0) %}
+    {% for row in module_rows if row.module.course_id == course.id %}
+    {% set course_module_count.value = course_module_count.value + 1 %}
+    {% set module = row.module %}
+    <article class="border rounded-4 p-3 mt-3">
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+        <div>
+          <h4 class="h5 mb-1">{{ module.title }}</h4>
+          <span class="badge {% if module.status == 'PUBLISHED' %}text-bg-success{% else %}text-bg-warning{% endif %}">{{ module.status }}</span>
+          <p class="text-secondary mt-2 mb-0">{{ module.description or "No description" }}</p>
+        </div>
+        <form method="post" action="/admin/learning/modules/{{ module.id }}/status">
+          <input type="hidden" name="status" value="{{ 'DRAFT' if module.status == 'PUBLISHED' else 'PUBLISHED' }}">
+          <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">{{ "Unpublish" if module.status == "PUBLISHED" else "Publish" }}</button>
+        </form>
+      </div>
+      <form method="post" action="/admin/learning/modules/{{ module.id }}/edit" class="row g-2 mt-2">
+        <div class="col-md-3"><label class="form-label small">Course</label><select class="form-select form-select-sm" name="course_id" required>{% for item in courses %}<option value="{{ item.id }}" {% if item.id == module.course_id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
+        <div class="col-md-3"><label class="form-label small">Title</label><input class="form-control form-control-sm" name="title" value="{{ module.title }}" required></div>
+        <div class="col-md-3"><label class="form-label small">Description</label><input class="form-control form-control-sm" name="description" value="{{ module.description }}"></div>
+        <div class="col-md-3"><label class="form-label small">Objectives</label><input class="form-control form-control-sm" name="learning_objectives" value="{{ module.learning_objectives }}"></div>
+        <div class="col-12"><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save module</button></div>
+      </form>
+
+      <div class="row g-3 mt-1">
+        <div class="col-lg-4">
+          <h5 class="h6">Documents ({{ row.documents|length }})</h5>
+          {% for document in row.documents %}
+          <div class="small border-top py-2"><strong>{{ document.title }}</strong><br><span class="text-secondary">{{ document.extraction_status }} · {{ document.file_size_bytes }} bytes</span></div>
+          {% else %}<p class="small text-secondary">No documents uploaded.</p>{% endfor %}
+          <form method="post" action="/admin/learning/modules/{{ module.id }}/documents/upload" enctype="multipart/form-data" class="mt-2">
+            <label class="form-label small" for="document-{{ module.id }}">Add teaching material</label>
+            <input id="document-{{ module.id }}" class="form-control form-control-sm mb-2" type="file" name="file" accept=".pdf,.docx,.pptx,.txt" required>
+            <input class="form-control form-control-sm mb-2" name="title" placeholder="Display title">
+            <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Upload document</button>
+          </form>
+        </div>
+        <div class="col-lg-4">
+          <h5 class="h6">Flashcards ({{ row.flashcards|length }})</h5>
+          {% for card in row.flashcards %}
+          <div class="small border-top py-2">
+            <strong>{{ card.front }}</strong><br><span class="text-secondary">{{ card.approval_status }} · {{ card.topic }}</span>
+            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/status" class="mt-1 d-flex gap-2">
+              <select class="form-select form-select-sm" name="status" aria-label="Flashcard approval status">
+                {% for status in ["DRAFT", "APPROVED", "REJECTED"] %}<option value="{{ status }}" {% if card.approval_status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}
+              </select><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save</button>
+            </form>
+          </div>
+          {% else %}<p class="small text-secondary">No flashcards available.</p>{% endfor %}
+        </div>
+        <div class="col-lg-4">
+          <h5 class="h6">Generated questions ({{ row.questions|length }})</h5>
+          {% for question in row.questions %}
+          <div class="small border-top py-2">
+            <strong>{{ question.question_text }}</strong><br><span class="text-secondary">{{ question.question_type }} · {{ question.approval_status }}</span>
+            <form method="post" action="/admin/learning/questions/{{ question.id }}/status" class="mt-1 d-flex gap-2">
+              <select class="form-select form-select-sm" name="status" aria-label="Question approval status">
+                {% for status in ["DRAFT", "APPROVED", "REJECTED"] %}<option value="{{ status }}" {% if question.approval_status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}
+              </select><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save</button>
+            </form>
+          </div>
+          {% else %}<p class="small text-secondary">No generated questions available.</p>{% endfor %}
+        </div>
+      </div>
+      <details class="mt-3">
+        <summary class="fw-semibold">Student progress ({{ row.progress_rows|length }} active students)</summary>
+        {% if row.progress_rows %}
+        <div class="table-responsive mt-2">
+          <table class="table table-sm align-middle">
+            <thead><tr><th scope="col">Student</th><th scope="col">Cards reviewed</th><th scope="col">Due</th><th scope="col">Review count</th><th scope="col">Last review</th></tr></thead>
+            <tbody>
+              {% for progress in row.progress_rows %}
+              <tr>
+                <td>{{ progress.account.full_name }} <span class="text-secondary">({{ progress.account.student_code }})</span></td>
+                <td>{{ progress.reviewed_count }} / {{ row.flashcards|selectattr("approval_status", "equalto", "APPROVED")|list|length }}</td>
+                <td>{{ progress.due_count }}</td>
+                <td>{{ progress.review_count }}</td>
+                <td>{% if progress.last_reviewed_at %}{{ progress.last_reviewed_at.strftime("%Y-%m-%d %H:%M") }}{% else %}Not started{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}<p class="small text-secondary mt-2 mb-0">No active students are assigned to this module.</p>{% endif %}
+      </details>
+    </article>
+    {% endfor %}
+    {% if course_module_count.value == 0 %}<p class="text-secondary mt-3 mb-0">No modules yet. Create a module above.</p>{% endif %}
+  </section>
+  {% else %}
+  <section class="sq-card p-4"><p class="mb-0">No courses yet. Create a course to start organizing learning materials.</p></section>
+  {% endfor %}
+</div>
+{% endblock %}
