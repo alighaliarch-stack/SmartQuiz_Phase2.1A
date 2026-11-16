@@ -1,0 +1,155 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Content bank · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+    <div>
+      <p class="text-uppercase small mb-1 text-secondary">Teacher workspace</p>
+      <h1 class="h2 mb-0">Content bank</h1>
+    </div>
+    <a class="btn btn-sq btn-sq-outline" href="/admin/learning/dashboard">Courses and documents</a>
+  </div>
+  <p class="text-secondary mb-3">
+    AI-generated flashcards and questions are saved here automatically. Saving never shows anything to students:
+    content becomes <strong>live</strong> only when it is <em>assigned</em> to a course module, <em>published</em>,
+    and that course and module are published too.
+  </p>
+  {% if notice %}<div class="alert alert-info" role="status" data-notice>{{ notice }}</div>{% endif %}
+
+  <nav class="d-flex flex-wrap gap-2 mb-3" aria-label="Status filter">
+    {% for key, label in [("active", "Active"), ("unassigned", "Not assigned"), ("assigned", "Assigned · unpublished"), ("published", "Published"), ("live", "Live for students"), ("archived", "Archived"), ("deleted", "Recently deleted"), ("all", "All")] %}
+    <a class="btn btn-sm {% if filters.status == key %}btn-sq btn-sq-primary{% else %}btn-sq btn-sq-outline{% endif %}"
+       href="/admin/content?status={{ key }}&kind={{ filters.kind }}{% if filters.course_id %}&course_id={{ filters.course_id }}{% endif %}{% if filters.document_id %}&document_id={{ filters.document_id }}{% endif %}">{{ label }} ({{ counts[key] }})</a>
+    {% endfor %}
+  </nav>
+
+  <form method="get" action="/admin/content" class="row g-2 align-items-end mb-4 sq-card p-3">
+    <input type="hidden" name="status" value="{{ filters.status }}">
+    <div class="col-md-2"><label class="form-label small" for="filter-kind">Type</label>
+      <select id="filter-kind" class="form-select form-select-sm" name="kind">
+        {% for key, label in [("all", "All"), ("flashcards", "Flashcards"), ("questions", "Quiz questions")] %}<option value="{{ key }}" {% if filters.kind == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select></div>
+    <div class="col-md-3"><label class="form-label small" for="filter-course">Course</label>
+      <select id="filter-course" class="form-select form-select-sm" name="course_id">
+        <option value="">Any course</option>
+        {% for course in courses %}<option value="{{ course.id }}" {% if filters.course_id == course.id %}selected{% endif %}>{{ course.name }}</option>{% endfor %}
+      </select></div>
+    <div class="col-md-3"><label class="form-label small" for="filter-document">Source document</label>
+      <select id="filter-document" class="form-select form-select-sm" name="document_id">
+        <option value="">Any document</option>
+        {% for document in documents %}<option value="{{ document.id }}" {% if filters.document_id == document.id %}selected{% endif %}>{{ document.title }}</option>{% endfor %}
+      </select></div>
+    <div class="col-md-3"><label class="form-label small" for="filter-q">Search text</label><input id="filter-q" class="form-control form-control-sm" name="q" value="{{ filters.q }}"></div>
+    <div class="col-md-1"><button class="btn btn-sm btn-sq btn-sq-primary w-100" type="submit">Filter</button></div>
+  </form>
+
+  {% for row in rows %}
+  {% set item = row.item %}
+  {% set path = "/admin/content/" ~ row.kind ~ "/" ~ item.id %}
+  <article class="sq-card p-3 mb-3" data-content-row="{{ row.kind }}-{{ item.id }}" data-status="{{ row.status.key }}">
+    <div class="d-flex flex-wrap justify-content-between gap-2">
+      <div>
+        <span class="badge text-bg-light">{{ "Flashcard" if row.kind == "flashcards" else "Question · " ~ item.question_type }}</span>
+        <span class="badge {{ row.status.badge }}" data-status-label>{{ row.status.label }}</span>
+        <span class="small text-secondary ms-1">{{ row.status.detail }}</span>
+      </div>
+      <span class="small text-secondary">#{{ item.id }} · {{ item.ai_provider or "manual" }} {{ item.ai_model or "" }}</span>
+    </div>
+    {% if row.kind == "flashcards" %}
+      <p class="mt-2 mb-1"><strong>{{ item.front }}</strong></p>
+      <p class="mb-1">{{ item.back }}</p>
+    {% else %}
+      <p class="mt-2 mb-1"><strong>{{ item.question_text }}</strong></p>
+      <p class="small mb-1">Options: {{ item.answer_options }} · Answer: {{ item.correct_answer }}</p>
+      {% if row.imported_count %}<p class="small text-secondary mb-1">Used in {{ row.imported_count }} quiz question(s).</p>{% endif %}
+    {% endif %}
+    <p class="small text-secondary mb-2">
+      Source:
+      {% if row.document %}<a href="/admin/learning/documents/{{ row.document.id }}">{{ row.document.title }}</a>{% if row.version_number %} v{{ row.version_number }}{% endif %}{% if row.document.is_archived %} (archived document){% endif %}{% else %}no source document{% endif %}
+      {% if item.source_reference %} · {{ item.source_reference }}{% endif %}
+      · Course: {% if item.course %}{{ item.course.name }} › {{ item.module.title }}{% else %}not assigned{% endif %}
+    </p>
+
+    {% if row.status.key != "deleted" %}
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      {% if row.status.key != "archived" %}
+      <form method="post" action="{{ path }}/assign" class="d-flex flex-wrap gap-1 align-items-center">
+        <input type="hidden" name="next" value="{{ current_url }}">
+        <label class="visually-hidden" for="assign-{{ row.kind }}-{{ item.id }}">Course module</label>
+        <select id="assign-{{ row.kind }}-{{ item.id }}" class="form-select form-select-sm" name="module_id" required>
+          {% for module in placement_modules %}<option value="{{ module.id }}" {% if item.course_id and module.id == item.module_id %}selected{% endif %}>{{ module.course.name }} › {{ module.title }}</option>{% endfor %}
+        </select>
+        <label class="small text-nowrap"><input type="checkbox" name="publish" value="true"> publish</label>
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit" {% if not placement_modules %}disabled{% endif %}>{{ "Move" if item.course_id else "Assign to course" }}</button>
+      </form>
+      {% if item.course_id %}
+      <form method="post" action="{{ path }}/publish"><input type="hidden" name="next" value="{{ current_url }}">
+        <input type="hidden" name="publish" value="{{ 'false' if item.is_published else 'true' }}">
+        <button class="btn btn-sm {% if item.is_published %}btn-sq btn-sq-outline{% else %}btn-success{% endif %}" type="submit">{{ "Unpublish" if item.is_published else "Publish" }}</button></form>
+      <form method="post" action="{{ path }}/unassign"><input type="hidden" name="next" value="{{ current_url }}">
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Remove from course</button></form>
+      {% endif %}
+      <form method="post" action="{{ path }}/archive"><input type="hidden" name="next" value="{{ current_url }}">
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Archive</button></form>
+      {% else %}
+      <form method="post" action="{{ path }}/restore"><input type="hidden" name="next" value="{{ current_url }}">
+        <button class="btn btn-sm btn-success" type="submit">Restore</button></form>
+      {% endif %}
+      <a class="btn btn-sm btn-outline-danger" href="{{ path }}/delete">Delete…</a>
+      {% if row.kind == "questions" and row.status.key != "archived" %}
+      <form method="post" action="/admin/learning/questions/{{ item.id }}/add-to-quiz" class="d-flex gap-1">
+        <select class="form-select form-select-sm" name="quiz_id" aria-label="Draft quiz" required>
+          {% for quiz in draft_quizzes %}<option value="{{ quiz.id }}">{{ quiz.title }}</option>{% endfor %}
+        </select>
+        <button class="btn btn-sm btn-sq btn-sq-outline text-nowrap" type="submit" {% if not draft_quizzes %}disabled{% endif %}>Add to quiz</button>
+      </form>
+      {% endif %}
+    </div>
+    <details class="mt-2">
+      <summary class="small">Edit</summary>
+      {% if row.kind == "flashcards" %}
+      <form method="post" action="/admin/learning/flashcards/{{ item.id }}/edit" class="mt-2">
+        <input type="hidden" name="next" value="{{ current_url }}">
+        <label class="form-label small" for="card-front-{{ item.id }}">Prompt</label>
+        <textarea id="card-front-{{ item.id }}" class="form-control form-control-sm mb-1" name="front" rows="2" required>{{ item.front }}</textarea>
+        <label class="form-label small" for="card-back-{{ item.id }}">Answer</label>
+        <textarea id="card-back-{{ item.id }}" class="form-control form-control-sm mb-1" name="back" rows="3" required>{{ item.back }}</textarea>
+        <input class="form-control form-control-sm mb-1" name="explanation" value="{{ item.explanation }}" aria-label="Explanation">
+        <input class="form-control form-control-sm mb-1" name="topic" value="{{ item.topic }}" aria-label="Topic">
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save edits</button>
+      </form>
+      {% else %}
+      <form method="post" action="/admin/learning/questions/{{ item.id }}/edit" class="mt-2">
+        <input type="hidden" name="next" value="{{ current_url }}">
+        <label class="form-label small" for="question-text-{{ item.id }}">Question</label>
+        <textarea id="question-text-{{ item.id }}" class="form-control form-control-sm mb-1" name="question_text" rows="2" required>{{ item.question_text }}</textarea>
+        <label class="form-label small" for="question-type-{{ item.id }}">Type</label>
+        <select id="question-type-{{ item.id }}" class="form-select form-select-sm mb-1" name="question_type">
+          {% for qtype in ["mcq_single", "true_false", "short_answer"] %}<option value="{{ qtype }}" {% if item.question_type == qtype %}selected{% endif %}>{{ qtype }}</option>{% endfor %}
+        </select>
+        <label class="form-label small" for="question-options-{{ item.id }}">Options (JSON)</label>
+        <textarea id="question-options-{{ item.id }}" class="form-control form-control-sm mb-1" name="answer_options" rows="2">{{ item.answer_options }}</textarea>
+        <label class="form-label small" for="question-answer-{{ item.id }}">Correct answer (JSON)</label>
+        <textarea id="question-answer-{{ item.id }}" class="form-control form-control-sm mb-1" name="correct_answer" rows="2">{{ item.correct_answer }}</textarea>
+        <label class="form-label small" for="question-explanation-{{ item.id }}">Explanation</label>
+        <textarea id="question-explanation-{{ item.id }}" class="form-control form-control-sm mb-1" name="explanation" rows="2">{{ item.explanation }}</textarea>
+        <input class="form-control form-control-sm mb-1" name="topic" value="{{ item.topic }}" aria-label="Topic">
+        <p class="small text-secondary mb-1">Editing here never changes quizzes this question was already added to, or past results.</p>
+        <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save edits</button>
+      </form>
+      {% endif %}
+    </details>
+    {% else %}
+    <div class="d-flex flex-wrap gap-2">
+      <form method="post" action="{{ path }}/restore"><input type="hidden" name="next" value="/admin/content?status=deleted&notice=restored">
+        <button class="btn btn-sm btn-success" type="submit">Restore</button></form>
+      <a class="btn btn-sm btn-outline-danger" href="{{ path }}/purge">Delete permanently…</a>
+    </div>
+    {% endif %}
+  </article>
+  {% else %}
+  <section class="sq-card p-4"><p class="mb-0">No content matches these filters.</p></section>
+  {% endfor %}
+</div>
+{% endblock %}

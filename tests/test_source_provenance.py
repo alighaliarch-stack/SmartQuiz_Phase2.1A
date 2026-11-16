@@ -265,7 +265,7 @@ class _AppTestBase(unittest.TestCase):
         self.Session = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         db = self.Session()
         db.add(models.AppSetting(key=auth.PASSWORD_HASH_KEY, value=auth.hash_password("Teacher-test-password-2026")))
-        course = models.Course(name="Business Analytics", code="BA", description="")
+        course = models.Course(name="Business Analytics", code="BA", description="", status="PUBLISHED")
         db.add(course)
         db.flush()
         module = models.LearningModule(course_id=course.id, title="Data-driven decisions", description="",
@@ -407,7 +407,6 @@ class QuizProvenanceTests(_AppTestBase):
                                         data={"count": "3"})
         self.assertEqual(response.status_code, 200, response.text)
         question_id = response.json()["questions"][0]["id"]
-        self.client.post(f"/admin/learning/questions/{question_id}/status", data={"status": "APPROVED"})
         return document_id, question_id
 
     def _import(self, question_id, quiz_id):
@@ -535,6 +534,17 @@ NEW_COLUMNS = {
     "questions": ["generated_question_id", "source_document_id", "source_document_version_id",
                   "source_reference", "source_passage_id"],
 }
+# A pre-Phase-3A database also predates Phase 3B, so its lifecycle columns are absent too.
+PHASE_3B_COLUMNS = {
+    "courses": ["status", "archived_at", "deleted_at"],
+    "learning_modules": ["archived_at"],
+    "flashcards": ["course_id", "is_published", "assigned_at", "published_at", "archived_at", "deleted_at"],
+    "generated_questions": ["course_id", "is_published", "assigned_at", "published_at", "archived_at", "deleted_at"],
+}
+LEGACY_EXCLUDED = {
+    table: NEW_COLUMNS.get(table, []) + PHASE_3B_COLUMNS.get(table, [])
+    for table in set(NEW_COLUMNS) | set(PHASE_3B_COLUMNS)
+}
 
 
 class MigrationCompatibilityTests(unittest.TestCase):
@@ -547,7 +557,7 @@ class MigrationCompatibilityTests(unittest.TestCase):
         legacy = MetaData()
         for table in Base.metadata.sorted_tables:
             Table(table.name, legacy, *[
-                column._copy() for column in table.columns if column.name not in NEW_COLUMNS.get(table.name, [])
+                column._copy() for column in table.columns if column.name not in LEGACY_EXCLUDED.get(table.name, [])
             ])
         legacy.create_all(bind=self.engine)
         with self.engine.begin() as conn:
@@ -635,7 +645,9 @@ class MigrationCompatibilityTests(unittest.TestCase):
             client.post("/login", data={"password": "Teacher-test-password-2026"})
             dashboard = client.get("/admin/learning/dashboard")
             self.assertEqual(dashboard.status_code, 200)
-            self.assertIn("Section: Tools", dashboard.text)
+            bank = client.get("/admin/content?status=all")
+            self.assertIn("Section: Tools", bank.text)  # legacy citation label still shown
+            self.assertIn("Live for students", bank.text)  # legacy APPROVED card stays visible
             imported = client.post("/admin/learning/questions/1/add-to-quiz", data={"quiz_id": 1}, follow_redirects=False)
             self.assertEqual(imported.status_code, 303)
             db = Session()

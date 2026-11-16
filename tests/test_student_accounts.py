@@ -29,8 +29,8 @@ class StudentAccountTests(unittest.TestCase):
         self.Session = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         db = self.Session()
         db.add(models.AppSetting(key=auth.PASSWORD_HASH_KEY, value=self.teacher_password_hash))
-        self.course = models.Course(name="Biology", code="BIO", description="")
-        other_course = models.Course(name="History", code="HIST", description="")
+        self.course = models.Course(name="Biology", code="BIO", description="", status="PUBLISHED")
+        other_course = models.Course(name="History", code="HIST", description="", status="PUBLISHED")
         db.add_all([self.course, other_course])
         db.flush()
         self.module = models.LearningModule(
@@ -311,20 +311,14 @@ class StudentAccountTests(unittest.TestCase):
         card_id = card.id
         question_id = question.id
         db.close()
-        self.assertEqual(
-            self.client.post(
-                f"/admin/learning/flashcards/{card_id}/status",
-                data={"status": "APPROVED"},
-                follow_redirects=False,
-            ).status_code,
-            303,
+        assigned = self.client.post(
+            f"/admin/content/flashcards/{card_id}/assign",
+            data={"module_id": self.module_id, "publish": "true"},
+            follow_redirects=False,
         )
+        self.assertEqual(assigned.status_code, 303)
         self.assertEqual(
-            self.client.post(
-                f"/admin/learning/questions/{question_id}/status",
-                data={"status": "REJECTED"},
-                follow_redirects=False,
-            ).status_code,
+            self.client.post(f"/admin/content/questions/{question_id}/archive", follow_redirects=False).status_code,
             303,
         )
         self.assertEqual(
@@ -337,10 +331,14 @@ class StudentAccountTests(unittest.TestCase):
         )
         final_dashboard = self.client.get("/admin/learning/dashboard")
         self.assertIn("DRAFT", final_dashboard.text)
-        self.assertIn("Cell prompt", final_dashboard.text)
-        self.assertIn("APPROVED", final_dashboard.text)
-        self.assertIn("What is a cell?", final_dashboard.text)
-        self.assertIn("REJECTED", final_dashboard.text)
+        self.assertNotIn("Approve", final_dashboard.text)
+        self.assertNotIn("Reject", final_dashboard.text)
+        bank = self.client.get("/admin/content?status=all")
+        self.assertIn("Cell prompt", bank.text)
+        self.assertIn("Published · not live", bank.text)
+        self.assertIn("its module is a draft", bank.text)
+        self.assertIn("What is a cell?", bank.text)
+        self.assertIn("Archived", bank.text)
 
     def test_teacher_edits_and_reactivates_student_accounts(self):
         account, _ = self._create_account()
@@ -743,6 +741,8 @@ class StudentAccountTests(unittest.TestCase):
             front="What is a cell?",
             back="The basic unit of life.",
             approval_status="APPROVED",
+            course_id=self.course_id,
+            is_published=True,
         )
         draft = models.Flashcard(
             module_id=self.module_id,
@@ -859,6 +859,8 @@ class StudentAccountTests(unittest.TestCase):
                 explanation="Explanation",
                 topic="Cells",
                 approval_status="APPROVED",
+                course_id=self.course_id,
+                is_published=True,
             )
             for index in range(2)
         ]
@@ -931,6 +933,8 @@ class StudentAccountTests(unittest.TestCase):
             front="Hidden question",
             back="Hidden answer",
             approval_status="APPROVED",
+            course_id=self.course_id,
+            is_published=True,
         )
         db.add(card)
         db.commit()
@@ -1137,6 +1141,8 @@ class StudentAccountTests(unittest.TestCase):
             front="Define a cell.",
             back="Basic unit of life.",
             approval_status="APPROVED",
+            course_id=self.course_id,
+            is_published=True,
         )
         db.add(card)
         db.commit()

@@ -329,6 +329,60 @@ def _run_migrations() -> None:
             if generated_table in tables and "source_passage_id" not in _existing_columns(conn, generated_table):
                 conn.execute(text(f"ALTER TABLE {generated_table} ADD COLUMN source_passage_id VARCHAR(40)"))
 
+        # Phase 3B content lifecycle and course publication.
+        if "courses" in tables:
+            course_cols = _existing_columns(conn, "courses")
+            if "status" not in course_cols:
+                # Courses that already exist were always reachable by enrolled
+                # students (no course-level gate existed), so they start
+                # PUBLISHED. New courses default to DRAFT in the model.
+                conn.execute(text(
+                    "ALTER TABLE courses ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'PUBLISHED'"
+                ))
+            if "archived_at" not in course_cols:
+                conn.execute(text("ALTER TABLE courses ADD COLUMN archived_at DATETIME"))
+            if "deleted_at" not in course_cols:
+                conn.execute(text("ALTER TABLE courses ADD COLUMN deleted_at DATETIME"))
+        if "learning_modules" in tables and "archived_at" not in _existing_columns(conn, "learning_modules"):
+            conn.execute(text("ALTER TABLE learning_modules ADD COLUMN archived_at DATETIME"))
+        for content_table in ("flashcards", "generated_questions"):
+            if content_table not in tables:
+                continue
+            content_cols = _existing_columns(conn, content_table)
+            newly_added = "course_id" not in content_cols
+            if newly_added:
+                conn.execute(text(
+                    f"ALTER TABLE {content_table} ADD COLUMN course_id INTEGER REFERENCES courses(id)"
+                ))
+            if "is_published" not in content_cols:
+                conn.execute(text(
+                    f"ALTER TABLE {content_table} ADD COLUMN is_published BOOLEAN NOT NULL DEFAULT 0"
+                ))
+            for column in ("assigned_at", "published_at", "archived_at", "deleted_at"):
+                if column not in content_cols:
+                    conn.execute(text(f"ALTER TABLE {content_table} ADD COLUMN {column} DATETIME"))
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_{content_table}_course_id ON {content_table}(course_id)"
+            ))
+            if newly_added:
+                # One-time mapping of the old review states, run only in the
+                # migration that introduces the lifecycle columns:
+                #   APPROVED -> assigned to its module's course and published
+                #               (it was student-visible before; it stays so)
+                #   REJECTED -> archived (reversible; nothing is discarded)
+                #   PENDING / DRAFT -> left unassigned in the content bank
+                now = datetime.now(timezone.utc).isoformat(sep=" ")
+                conn.execute(text(
+                    f"UPDATE {content_table} SET "
+                    "course_id = (SELECT course_id FROM learning_modules "
+                    f"WHERE learning_modules.id = {content_table}.module_id), "
+                    "is_published = 1, assigned_at = :now, published_at = :now "
+                    "WHERE approval_status = 'APPROVED'"
+                ), {"now": now})
+                conn.execute(text(
+                    f"UPDATE {content_table} SET archived_at = :now WHERE approval_status = 'REJECTED'"
+                ), {"now": now})
+
         if "sessions" in tables:
             session_cols = _existing_columns(conn, "sessions")
             # Phase 2 — Classroom Radio. Every pre-existing session gets

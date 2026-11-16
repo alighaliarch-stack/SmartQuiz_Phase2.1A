@@ -332,6 +332,12 @@ class Course(Base):
     code = Column(String(50), unique=True, nullable=False, index=True)
     description = Column(Text, default="", nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    # Phase 3B lifecycle. New courses start as DRAFT; the migration marks
+    # courses that existed before it as PUBLISHED (there was no course-level
+    # gate before, so this keeps existing student access unchanged).
+    status = Column(String(20), default="DRAFT", server_default="DRAFT", nullable=False)
+    archived_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)  # soft delete ("Recently deleted")
 
     modules = relationship("LearningModule", back_populates="course", cascade="all, delete-orphan")
     documents = relationship("Document", back_populates="course", cascade="all, delete-orphan")
@@ -350,6 +356,7 @@ class LearningModule(Base):
     learning_objectives = Column(Text, default="", nullable=False)
     status = Column(String(20), default="DRAFT", nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    archived_at = Column(DateTime, nullable=True)  # Phase 3B: archived modules are hidden from students
 
     course = relationship("Course", back_populates="modules")
     documents = relationship("Document", back_populates="module", cascade="all, delete-orphan")
@@ -466,12 +473,25 @@ class Flashcard(Base):
     difficulty = Column(String(20), default="medium", nullable=False)
     source_reference = Column(String(255), default="", nullable=False)
     source_passage_id = Column(String(40), nullable=True)  # e.g. "P12"; NULL before Phase 3A
+    # Legacy review state (Phase 2). Kept for history; no longer used for
+    # visibility. New content is written as "SAVED".
     approval_status = Column(String(20), default="DRAFT", nullable=False)
     generated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     ai_provider = Column(String(30), nullable=True)
     ai_model = Column(String(50), nullable=True)
+    # Phase 3B content lifecycle. course_id NULL = saved in the content bank
+    # only. Students see a card only when it is assigned (course_id set and
+    # matching its module's course), published, not archived, not deleted,
+    # and its course and module are live.
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)
+    is_published = Column(Boolean, default=False, server_default="0", nullable=False)
+    assigned_at = Column(DateTime, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
 
     module = relationship("LearningModule", back_populates="flashcards")
+    course = relationship("Course")
     progress = relationship("StudentFlashcardProgress", back_populates="flashcard", cascade="all, delete-orphan")
     reviews = relationship("FlashcardReview", back_populates="flashcard", cascade="all, delete-orphan")
 
@@ -495,12 +515,20 @@ class GeneratedQuestion(Base):
     topic = Column(String(150), default="", nullable=False)
     source_reference = Column(String(255), default="", nullable=False)
     source_passage_id = Column(String(40), nullable=True)  # e.g. "P12"; NULL before Phase 3A
-    approval_status = Column(String(20), default="DRAFT", nullable=False)
+    approval_status = Column(String(20), default="DRAFT", nullable=False)  # legacy, see Flashcard
     generated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     ai_provider = Column(String(30), nullable=True)
     ai_model = Column(String(50), nullable=True)
+    # Phase 3B content lifecycle - same rules as Flashcard.
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)
+    is_published = Column(Boolean, default=False, server_default="0", nullable=False)
+    assigned_at = Column(DateTime, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
 
     module = relationship("LearningModule", back_populates="generated_questions")
+    course = relationship("Course")
 
 
 class StudentFlashcardProgress(Base):

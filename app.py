@@ -449,6 +449,62 @@ def _get_quiz_participant(
     return student
 
 
+def _course_is_live(course: Course | None) -> bool:
+    """A course students may reach: published, not archived, not deleted."""
+    return (
+        course is not None
+        and course.status == "PUBLISHED"
+        and course.archived_at is None
+        and course.deleted_at is None
+    )
+
+
+def _module_is_live(module: LearningModule | None) -> bool:
+    return (
+        module is not None
+        and module.status == "PUBLISHED"
+        and module.archived_at is None
+        and _course_is_live(module.course)
+    )
+
+
+def _live_module_filters() -> tuple:
+    """SQL conditions for a student-reachable module; the query must join Course."""
+    return (
+        LearningModule.status == "PUBLISHED",
+        LearningModule.archived_at.is_(None),
+        Course.status == "PUBLISHED",
+        Course.archived_at.is_(None),
+        Course.deleted_at.is_(None),
+    )
+
+
+def _student_visible_content(model, module: LearningModule | None = None) -> tuple:
+    """SQL conditions for flashcards/generated questions a student may see.
+
+    Generation only saves content; it becomes student-visible when a teacher
+    assigns it to a course (placing it in one of that course's modules) and
+    publishes it, and it is neither archived nor deleted. When a module is
+    given, the content must also sit in that module and its assigned course
+    must be the module's course."""
+    conditions = [
+        model.course_id.isnot(None),
+        model.is_published.is_(True),
+        model.archived_at.is_(None),
+        model.deleted_at.is_(None),
+    ]
+    if module is not None:
+        conditions += [model.module_id == module.id, model.course_id == module.course_id]
+    return tuple(conditions)
+
+
+def _visible_flashcard_ids(db: Session, modules: list[LearningModule]) -> list[int]:
+    ids: list[int] = []
+    for module in modules:
+        ids += [row[0] for row in db.query(Flashcard.id).filter(*_student_visible_content(Flashcard, module)).all()]
+    return ids
+
+
 def _module_access_allowed(db: Session, account_id: int, module: LearningModule) -> bool:
     now = datetime.now(timezone.utc)
     assignments = (
@@ -480,7 +536,8 @@ def _get_student_module_or_404(
 ) -> LearningModule:
     module = (
         db.query(LearningModule)
-        .filter(LearningModule.id == module_id, LearningModule.status == "PUBLISHED")
+        .join(Course, Course.id == LearningModule.course_id)
+        .filter(LearningModule.id == module_id, *_live_module_filters())
         .first()
     )
     if module is None or not _module_access_allowed(db, account_id, module):
@@ -505,9 +562,9 @@ def _get_assigned_published_modules(db: Session, account_id: int) -> list[Learni
                 expiry = expiry.replace(tzinfo=timezone.utc)
             if expiry <= datetime.now(timezone.utc):
                 continue
-        query = db.query(LearningModule).filter(
+        query = db.query(LearningModule).join(Course, Course.id == LearningModule.course_id).filter(
             LearningModule.course_id == assignment.course_id,
-            LearningModule.status == "PUBLISHED",
+            *_live_module_filters(),
         )
         if assignment.module_id is not None:
             query = query.filter(LearningModule.id == assignment.module_id)
@@ -524,10 +581,12 @@ def _get_student_flashcard_or_404(
     flashcard = (
         db.query(Flashcard)
         .join(LearningModule, LearningModule.id == Flashcard.module_id)
+        .join(Course, Course.id == LearningModule.course_id)
         .filter(
             Flashcard.id == flashcard_id,
-            Flashcard.approval_status == "APPROVED",
-            LearningModule.status == "PUBLISHED",
+            *_student_visible_content(Flashcard),
+            Flashcard.course_id == LearningModule.course_id,
+            *_live_module_filters(),
         )
         .first()
     )
@@ -561,12 +620,14 @@ def _student_dashboard_data(db: Session, account: StudentAccount) -> dict:
         )
         flashcards = (
             db.query(Flashcard)
-            .filter(
-                Flashcard.module_id == module.id,
-                Flashcard.approval_status == "APPROVED",
-            )
+            .filter(*_student_visible_content(Flashcard, module))
             .order_by(Flashcard.id)
             .all()
+        )
+        practice_question_count = (
+            db.query(GeneratedQuestion)
+            .filter(*_student_visible_content(GeneratedQuestion, module))
+            .count()
         )
         visible_flashcard_ids.update(card.id for card in flashcards)
         progress_rows = (
@@ -584,6 +645,7 @@ def _student_dashboard_data(db: Session, account: StudentAccount) -> dict:
             "course": module.course,
             "documents": documents,
             "flashcards": flashcards,
+            "practice_question_count": practice_question_count,
             "reviewed_count": sum(
                 1 for card in flashcards
                 if progress_by_card.get(card.id) and progress_by_card[card.id].review_count
@@ -782,10 +844,11 @@ def student_learning_material(
     document = (
         db.query(Document)
         .join(LearningModule, LearningModule.id == Document.module_id)
+        .join(Course, Course.id == LearningModule.course_id)
         .filter(
             Document.id == document_id,
             Document.is_archived.is_(False),
-            LearningModule.status == "PUBLISHED",
+            *_live_module_filters(),
         )
         .first()
     )
@@ -842,10 +905,7 @@ def student_flashcard_queue(
     for module in modules:
         for flashcard in (
             db.query(Flashcard)
-            .filter(
-                Flashcard.module_id == module.id,
-                Flashcard.approval_status == "APPROVED",
-            )
+            .filter(*_student_visible_content(Flashcard, module))
             .order_by(Flashcard.id)
             .all()
         ):
@@ -873,17 +933,7 @@ def student_flashcard_queue(
     )
     # Include reviewed cards in the daily count even when their next due
     # date has moved beyond today.
-    module_ids = [module.id for module in modules]
-    all_visible_card_ids = (
-        db.query(Flashcard.id)
-        .filter(
-            Flashcard.module_id.in_(module_ids),
-            Flashcard.approval_status == "APPROVED",
-        )
-        .all()
-        if module_ids else []
-    )
-    all_card_ids = [item[0] for item in all_visible_card_ids]
+    all_card_ids = _visible_flashcard_ids(db, modules)
     reviewed_today = (
         db.query(StudentAccountFlashcardReview)
         .filter(
@@ -902,6 +952,49 @@ def student_flashcard_queue(
     })
 
 
+@app.get("/student/practice")
+def student_practice_questions(
+    request: Request,
+    module_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Self-study view of generated questions assigned and published to the student's courses."""
+    account = _get_authenticated_student_account(request, db)
+    modules = (
+        [_get_student_module_or_404(db, account.id, module_id)]
+        if module_id is not None
+        else _get_assigned_published_modules(db, account.id)
+    )
+    sections = []
+    for module in modules:
+        questions = (
+            db.query(GeneratedQuestion)
+            .filter(*_student_visible_content(GeneratedQuestion, module))
+            .order_by(GeneratedQuestion.id)
+            .all()
+        )
+        if questions:
+            sections.append({
+                "module": module,
+                "questions": [
+                    {
+                        "id": question.id,
+                        "text": question.question_text,
+                        "type": question.question_type,
+                        "options": json.loads(question.answer_options or "[]"),
+                        "answer": json.loads(question.correct_answer or "null"),
+                        "explanation": question.explanation,
+                    }
+                    for question in questions
+                ],
+            })
+    return templates.TemplateResponse(
+        request=request,
+        name="student_practice.html",
+        context={"app_name": settings.APP_NAME, "sections": sections, "module_id": module_id},
+    )
+
+
 @app.get("/student/study/history")
 def student_flashcard_history(
     request: Request,
@@ -914,19 +1007,18 @@ def student_flashcard_history(
         if module_id is not None
         else _get_assigned_published_modules(db, account.id)
     )
-    module_ids = [module.id for module in modules]
+    visible_ids = _visible_flashcard_ids(db, modules)
     rows = (
         db.query(StudentAccountFlashcardReview, Flashcard)
         .join(Flashcard, Flashcard.id == StudentAccountFlashcardReview.flashcard_id)
         .filter(
             StudentAccountFlashcardReview.account_id == account.id,
-            Flashcard.module_id.in_(module_ids),
-            Flashcard.approval_status == "APPROVED",
+            Flashcard.id.in_(visible_ids),
         )
         .order_by(StudentAccountFlashcardReview.reviewed_at.desc())
         .limit(50)
         .all()
-        if module_ids else []
+        if visible_ids else []
     )
     return JSONResponse({
         "reviews": [
@@ -1169,6 +1261,8 @@ def admin_assign_student_course(
         raise HTTPException(status_code=404, detail="Student account or course not found.")
     if not account.is_active:
         raise HTTPException(status_code=409, detail="Activate the student account before assigning it.")
+    if course.archived_at is not None or course.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="Restore the course before assigning students to it.")
     if module_id is not None:
         module = db.query(LearningModule).filter(
             LearningModule.id == module_id,
@@ -1223,20 +1317,19 @@ def admin_learning_dashboard_page(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    courses = db.query(Course).order_by(Course.name).all()
-    modules = db.query(LearningModule).order_by(LearningModule.title).all()
-    draft_quizzes = db.query(Quiz).filter(Quiz.status == "Draft").order_by(Quiz.title).all()
+    all_courses = db.query(Course).order_by(Course.name).all()
+    courses = [course for course in all_courses if course.deleted_at is None]
+    deleted_courses = [course for course in all_courses if course.deleted_at is not None]
+    deleted_course_ids = {course.id for course in deleted_courses}
+    modules = [
+        module for module in db.query(LearningModule).order_by(LearningModule.title).all()
+        if module.course_id not in deleted_course_ids
+    ]
     module_rows = []
     for module in modules:
-        approved_flashcards = (
-            db.query(Flashcard)
-            .filter(
-                Flashcard.module_id == module.id,
-                Flashcard.approval_status == "APPROVED",
-            )
-            .all()
-        )
-        approved_flashcard_ids = [card.id for card in approved_flashcards]
+        approved_flashcard_ids = [
+            row[0] for row in db.query(Flashcard.id).filter(*_student_visible_content(Flashcard, module)).all()
+        ]
         active_assignments = (
             db.query(StudentAccountEnrollment, StudentAccount)
             .join(StudentAccount, StudentAccount.id == StudentAccountEnrollment.account_id)
@@ -1283,27 +1376,29 @@ def admin_learning_dashboard_page(
                 "review_count": sum(item.review_count for item in progress),
                 "last_reviewed_at": latest_review.reviewed_at if latest_review else None,
             })
+        documents = db.query(Document).filter(Document.module_id == module.id).order_by(Document.created_at.desc()).all()
+        placed = {
+            "flashcards": db.query(Flashcard).filter(
+                Flashcard.module_id == module.id, Flashcard.course_id == module.course_id, Flashcard.deleted_at.is_(None)
+            ).all(),
+            "questions": db.query(GeneratedQuestion).filter(
+                GeneratedQuestion.module_id == module.id, GeneratedQuestion.course_id == module.course_id,
+                GeneratedQuestion.deleted_at.is_(None),
+            ).all(),
+        }
         module_rows.append({
             "module": module,
-            "documents": (
-                db.query(Document)
-                .filter(Document.module_id == module.id, Document.is_archived.is_(False))
-                .order_by(Document.created_at.desc())
-                .all()
-            ),
-            "flashcards": (
-                db.query(Flashcard)
-                .filter(Flashcard.module_id == module.id)
-                .order_by(Flashcard.id)
-                .all()
-            ),
+            "documents": [document for document in documents if not document.is_archived],
+            "archived_documents": [document for document in documents if document.is_archived],
             "progress_rows": progress_rows,
-            "questions": (
-                db.query(GeneratedQuestion)
-                .filter(GeneratedQuestion.module_id == module.id)
-                .order_by(GeneratedQuestion.id)
-                .all()
-            ),
+            "live_flashcard_count": len(approved_flashcard_ids),
+            "content_counts": {
+                kind: {
+                    "assigned": sum(1 for item in items if item.archived_at is None),
+                    "live": sum(1 for item in items if _content_status(item)["key"] == "live"),
+                }
+                for kind, items in placed.items()
+            },
         })
     return templates.TemplateResponse(
         request=request,
@@ -1312,10 +1407,21 @@ def admin_learning_dashboard_page(
             "app_name": settings.APP_NAME,
             "active_page": "learning",
             "courses": courses,
+            "active_courses": [course for course in courses if course.archived_at is None],
+            "deleted_courses": deleted_courses,
             "modules": modules,
             "module_rows": module_rows,
-            "draft_quizzes": draft_quizzes,
+            "unassigned_count": {
+                "flashcards": db.query(Flashcard).filter(
+                    Flashcard.course_id.is_(None), Flashcard.archived_at.is_(None), Flashcard.deleted_at.is_(None)
+                ).count(),
+                "questions": db.query(GeneratedQuestion).filter(
+                    GeneratedQuestion.course_id.is_(None), GeneratedQuestion.archived_at.is_(None),
+                    GeneratedQuestion.deleted_at.is_(None),
+                ).count(),
+            },
             "student_portal_url": _student_portal_url(request),
+            "notice": request.query_params.get("notice"),
         },
     )
 
@@ -1361,6 +1467,8 @@ def admin_edit_learning_module(
     course = db.query(Course).filter(Course.id == course_id).first()
     if module is None or course is None:
         raise HTTPException(status_code=404, detail="Module or course not found.")
+    if course.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="A module cannot be moved into a deleted course.")
     clean_title = title.strip()
     if not clean_title or len(clean_title) > 200:
         raise HTTPException(status_code=400, detail="Module title is invalid.")
@@ -1372,6 +1480,13 @@ def admin_edit_learning_module(
         {Document.course_id: course.id},
         synchronize_session=False,
     )
+    # Content assigned through this module follows it to its new course;
+    # unassigned (content-bank-only) items stay unassigned.
+    for model in (Flashcard, GeneratedQuestion):
+        db.query(model).filter(model.module_id == module.id, model.course_id.isnot(None)).update(
+            {model.course_id: course.id},
+            synchronize_session=False,
+        )
     db.commit()
     return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
 
@@ -1393,21 +1508,521 @@ def admin_set_learning_module_status(
     return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
 
 
-@app.post("/admin/learning/flashcards/{flashcard_id}/status")
-def admin_set_flashcard_status(
-    flashcard_id: int,
-    status: str = Form(...),
+# ===================================================================
+# Phase 3B - content bank, course publication and lifecycle
+# ===================================================================
+
+CONTENT_KINDS = {"flashcards": Flashcard, "questions": GeneratedQuestion}
+CONTENT_STATUS_FILTERS = {
+    "active": {"unassigned", "assigned", "published", "live"},
+    "unassigned": {"unassigned"},
+    "assigned": {"assigned"},
+    "published": {"published", "live"},
+    "live": {"live"},
+    "archived": {"archived"},
+    "deleted": {"deleted"},
+    "all": {"unassigned", "assigned", "published", "live", "archived", "deleted"},
+}
+CONTENT_NOTICES = {
+    "saved": "Generated content was saved to the content bank. It is not visible to students until you assign it to a course and publish it.",
+    "assigned": "Content assigned to the course.",
+    "unassigned": "Content removed from its course. The content itself is still saved here.",
+    "published": "Content published.",
+    "unpublished": "Content unpublished. Students can no longer see it.",
+    "archived": "Content archived. It is hidden from students and can be restored.",
+    "restored": "Content restored.",
+    "deleted": "Content moved to Recently deleted. It can be restored from there.",
+    "purged": "Content permanently deleted.",
+}
+
+
+def _content_status(item) -> dict:
+    """Teacher-facing lifecycle state of a flashcard or generated question."""
+    if item.deleted_at is not None:
+        return {"key": "deleted", "label": "Deleted", "badge": "text-bg-dark",
+                "detail": "In Recently deleted. Restore it, or delete it permanently."}
+    if item.archived_at is not None:
+        return {"key": "archived", "label": "Archived", "badge": "text-bg-secondary",
+                "detail": "Hidden from students. Restore it to use it again."}
+    if item.course_id is None:
+        return {"key": "unassigned", "label": "Saved · not assigned", "badge": "text-bg-info",
+                "detail": "Only teachers can see it. Assign it to a course to use it."}
+    if not item.is_published:
+        return {"key": "assigned", "label": "Assigned · not published", "badge": "text-bg-warning",
+                "detail": "Students cannot see it until you publish it."}
+    reasons = []
+    course, module = item.course, item.module
+    if course is None or course.deleted_at is not None:
+        reasons.append("its course is deleted")
+    elif course.archived_at is not None:
+        reasons.append("its course is archived")
+    elif course.status != "PUBLISHED":
+        reasons.append("its course is a draft")
+    if module is None or module.course_id != item.course_id:
+        reasons.append("it is not placed in a module of that course")
+    elif module.archived_at is not None:
+        reasons.append("its module is archived")
+    elif module.status != "PUBLISHED":
+        reasons.append("its module is a draft")
+    if reasons:
+        return {"key": "published", "label": "Published · not live", "badge": "text-bg-primary",
+                "detail": "Not visible yet because " + " and ".join(reasons) + "."}
+    return {"key": "live", "label": "Live for students", "badge": "text-bg-success",
+            "detail": "Visible to students enrolled in this course or module."}
+
+
+def _course_status(course: Course) -> dict:
+    if course.deleted_at is not None:
+        return {"key": "deleted", "label": "Deleted", "badge": "text-bg-dark"}
+    if course.archived_at is not None:
+        return {"key": "archived", "label": "Archived", "badge": "text-bg-secondary"}
+    if course.status == "PUBLISHED":
+        return {"key": "published", "label": "Published", "badge": "text-bg-success"}
+    return {"key": "draft", "label": "Draft", "badge": "text-bg-warning"}
+
+
+templates.env.globals["content_status"] = _content_status
+templates.env.globals["course_status"] = _course_status
+
+
+def _content_or_404(db: Session, kind: str, item_id: int):
+    model = CONTENT_KINDS.get(kind)
+    item = db.get(model, item_id) if model is not None else None
+    if item is None:
+        raise HTTPException(status_code=404, detail="Content not found.")
+    return item
+
+
+def _require_confirmation(confirm: str) -> None:
+    if confirm != "yes":
+        raise HTTPException(status_code=400, detail="This action needs explicit confirmation.")
+
+
+def _confirm_page(request: Request, **context):
+    return templates.TemplateResponse(
+        request=request,
+        name="teacher_confirm_action.html",
+        context={"app_name": settings.APP_NAME, "active_page": "content", "blockers": [], **context},
+    )
+
+
+@app.get("/admin/content")
+def admin_content_bank(
+    request: Request,
+    kind: str = "all",
+    status: str = "active",
+    course_id: int | None = None,
+    document_id: int | None = None,
+    q: str = "",
     db: Session = Depends(get_db),
 ):
-    flashcard = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
-    if flashcard is None:
-        raise HTTPException(status_code=404, detail="Flashcard not found.")
+    wanted = CONTENT_STATUS_FILTERS.get(status, CONTENT_STATUS_FILTERS["active"])
+    search = q.strip().casefold()
+    documents = {document.id: document for document in db.query(Document).all()}
+    versions = {version.id: version for version in db.query(DocumentVersion).all()}
+    rows, counts = [], {key: 0 for key in CONTENT_STATUS_FILTERS}
+    for kind_key, model in CONTENT_KINDS.items():
+        for item in db.query(model).order_by(model.id.desc()).all():
+            item_status = _content_status(item)
+            for filter_key, members in CONTENT_STATUS_FILTERS.items():
+                if item_status["key"] in members:
+                    counts[filter_key] += 1
+            if kind != "all" and kind != kind_key:
+                continue
+            if item_status["key"] not in wanted:
+                continue
+            if course_id is not None and item.course_id != course_id:
+                continue
+            if document_id is not None and item.source_document_id != document_id:
+                continue
+            text_value = item.front + " " + item.back if kind_key == "flashcards" else item.question_text
+            if search and search not in text_value.casefold():
+                continue
+            version = versions.get(item.source_document_version_id)
+            rows.append({
+                "kind": kind_key,
+                "item": item,
+                "status": item_status,
+                "document": documents.get(item.source_document_id),
+                "version_number": version.version_number if version else None,
+                "imported_count": (
+                    db.query(Question).filter(Question.generated_question_id == item.id).count()
+                    if kind_key == "questions" else 0
+                ),
+            })
+    placement_modules = (
+        db.query(LearningModule)
+        .join(Course, Course.id == LearningModule.course_id)
+        .filter(Course.deleted_at.is_(None), Course.archived_at.is_(None), LearningModule.archived_at.is_(None))
+        .order_by(Course.name, LearningModule.title)
+        .all()
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="teacher_content_bank.html",
+        context={
+            "app_name": settings.APP_NAME,
+            "active_page": "content",
+            "rows": rows,
+            "counts": counts,
+            "filters": {"kind": kind, "status": status, "course_id": course_id, "document_id": document_id, "q": q},
+            "courses": db.query(Course).filter(Course.deleted_at.is_(None)).order_by(Course.name).all(),
+            "documents": sorted(documents.values(), key=lambda document: document.title.casefold()),
+            "placement_modules": placement_modules,
+            "draft_quizzes": db.query(Quiz).filter(Quiz.status == "Draft").order_by(Quiz.title).all(),
+            "notice": CONTENT_NOTICES.get(request.query_params.get("notice", "")),
+            "current_url": str(request.url.path) + ("?" + request.url.query if request.url.query else ""),
+        },
+    )
+
+
+@app.post("/admin/content/{kind}/{item_id}/assign")
+def admin_assign_content(
+    kind: str,
+    item_id: int,
+    module_id: int = Form(...),
+    publish: bool = Form(False),
+    next: str = Form("/admin/content?notice=assigned"),
+    db: Session = Depends(get_db),
+):
+    item = _content_or_404(db, kind, item_id)
+    if item.archived_at is not None or item.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="Restore this content before assigning it.")
+    module = db.get(LearningModule, module_id)
+    if module is None:
+        raise HTTPException(status_code=404, detail="Module not found.")
+    course = module.course
+    if course.deleted_at is not None or course.archived_at is not None or module.archived_at is not None:
+        raise HTTPException(status_code=409, detail="Content cannot be assigned to an archived or deleted course or module.")
+    now = datetime.now(timezone.utc)
+    item.module_id = module.id
+    item.course_id = course.id
+    item.assigned_at = now
+    item.is_published = publish
+    item.published_at = now if publish else None
+    db.commit()
+    return _admin_redirect(next)
+
+
+@app.post("/admin/content/{kind}/{item_id}/unassign")
+def admin_unassign_content(
+    kind: str,
+    item_id: int,
+    next: str = Form("/admin/content?notice=unassigned"),
+    db: Session = Depends(get_db),
+):
+    item = _content_or_404(db, kind, item_id)
+    item.course_id = None
+    item.is_published = False
+    item.assigned_at = None
+    item.published_at = None
+    db.commit()
+    return _admin_redirect(next)
+
+
+@app.post("/admin/content/{kind}/{item_id}/publish")
+def admin_publish_content(
+    kind: str,
+    item_id: int,
+    publish: bool = Form(...),
+    next: str = Form("/admin/content"),
+    db: Session = Depends(get_db),
+):
+    item = _content_or_404(db, kind, item_id)
+    if publish:
+        if item.course_id is None:
+            raise HTTPException(status_code=409, detail="Assign this content to a course before publishing it.")
+        if item.archived_at is not None or item.deleted_at is not None:
+            raise HTTPException(status_code=409, detail="Restore this content before publishing it.")
+    item.is_published = publish
+    item.published_at = datetime.now(timezone.utc) if publish else None
+    db.commit()
+    return _admin_redirect(next)
+
+
+@app.post("/admin/content/{kind}/{item_id}/archive")
+def admin_archive_content(
+    kind: str,
+    item_id: int,
+    next: str = Form("/admin/content?notice=archived"),
+    db: Session = Depends(get_db),
+):
+    item = _content_or_404(db, kind, item_id)
+    if item.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="Deleted content cannot be archived; restore it first.")
+    item.archived_at = item.archived_at or datetime.now(timezone.utc)
+    db.commit()
+    return _admin_redirect(next)
+
+
+@app.post("/admin/content/{kind}/{item_id}/restore")
+def admin_restore_content(
+    kind: str,
+    item_id: int,
+    next: str = Form("/admin/content?notice=restored"),
+    db: Session = Depends(get_db),
+):
+    """Undo archive and/or delete. Assignment and publication are kept as they were."""
+    item = _content_or_404(db, kind, item_id)
+    item.archived_at = None
+    item.deleted_at = None
+    db.commit()
+    return _admin_redirect(next)
+
+
+def _content_summary(kind: str, item) -> str:
+    return item.front if kind == "flashcards" else item.question_text
+
+
+@app.get("/admin/content/{kind}/{item_id}/delete")
+def admin_delete_content_page(request: Request, kind: str, item_id: int, db: Session = Depends(get_db)):
+    item = _content_or_404(db, kind, item_id)
+    return _confirm_page(
+        request,
+        title="Delete content",
+        heading="Move this item to Recently deleted?",
+        item_summary=_content_summary(kind, item),
+        consequences=[
+            "Students will no longer see it.",
+            "It stays in Recently deleted with its course assignment and source provenance, and can be restored.",
+            "Quiz questions already created from it, quiz results and student review history are not changed.",
+        ],
+        action_url=f"/admin/content/{kind}/{item_id}/delete",
+        button_label="Move to Recently deleted",
+        cancel_url="/admin/content",
+    )
+
+
+@app.post("/admin/content/{kind}/{item_id}/delete")
+def admin_delete_content(
+    kind: str,
+    item_id: int,
+    confirm: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    _require_confirmation(confirm)
+    item = _content_or_404(db, kind, item_id)
+    item.deleted_at = item.deleted_at or datetime.now(timezone.utc)
+    db.commit()
+    return RedirectResponse(url="/admin/content?notice=deleted", status_code=303)
+
+
+def _content_purge_blockers(db: Session, kind: str, item) -> list[str]:
+    if kind == "flashcards":
+        history = sum(
+            db.query(model).filter(model.flashcard_id == item.id).count()
+            for model in (StudentAccountFlashcardProgress, StudentAccountFlashcardReview,
+                          StudentFlashcardProgress, FlashcardReview)
+        )
+        return [f"{history} student progress or review record(s) refer to this flashcard."] if history else []
+    imported = db.query(Question).filter(Question.generated_question_id == item.id).count()
+    return [f"{imported} quiz question(s) were created from this question and keep it as their source."] if imported else []
+
+
+@app.get("/admin/content/{kind}/{item_id}/purge")
+def admin_purge_content_page(request: Request, kind: str, item_id: int, db: Session = Depends(get_db)):
+    item = _content_or_404(db, kind, item_id)
+    blockers = _content_purge_blockers(db, kind, item)
+    if item.deleted_at is None:
+        blockers.insert(0, "Move it to Recently deleted first.")
+    return _confirm_page(
+        request,
+        title="Delete permanently",
+        heading="Permanently delete this item?",
+        item_summary=_content_summary(kind, item),
+        consequences=["The item is removed for good and cannot be restored."],
+        blockers=blockers,
+        action_url=f"/admin/content/{kind}/{item_id}/purge",
+        button_label="Delete permanently",
+        cancel_url="/admin/content?status=deleted",
+    )
+
+
+@app.post("/admin/content/{kind}/{item_id}/purge")
+def admin_purge_content(
+    kind: str,
+    item_id: int,
+    confirm: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    _require_confirmation(confirm)
+    item = _content_or_404(db, kind, item_id)
+    if item.deleted_at is None:
+        raise HTTPException(status_code=409, detail="Move this content to Recently deleted before deleting it permanently.")
+    blockers = _content_purge_blockers(db, kind, item)
+    if blockers:
+        raise HTTPException(status_code=409, detail="Permanent deletion is blocked to protect history: " + " ".join(blockers))
+    db.delete(item)
+    db.commit()
+    return RedirectResponse(url="/admin/content?status=deleted&notice=purged", status_code=303)
+
+
+# ------------------------------------------------------- course lifecycle
+
+def _course_or_404(db: Session, course_id: int) -> Course:
+    course = db.get(Course, course_id)
+    if course is None:
+        raise HTTPException(status_code=404, detail="Course not found.")
+    return course
+
+
+@app.post("/admin/learning/courses/{course_id}/status")
+def admin_set_course_status(course_id: int, status: str = Form(...), db: Session = Depends(get_db)):
+    course = _course_or_404(db, course_id)
     clean_status = status.strip().upper()
-    if clean_status not in {"DRAFT", "PENDING", "APPROVED", "REJECTED"}:
-        raise HTTPException(status_code=400, detail="Invalid flashcard approval status.")
-    flashcard.approval_status = clean_status
+    if clean_status not in {"DRAFT", "PUBLISHED"}:
+        raise HTTPException(status_code=400, detail="Course status must be DRAFT or PUBLISHED.")
+    if course.archived_at is not None or course.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="Restore the course before publishing or unpublishing it.")
+    course.status = clean_status
     db.commit()
     return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/courses/{course_id}/archive")
+def admin_archive_course(course_id: int, db: Session = Depends(get_db)):
+    course = _course_or_404(db, course_id)
+    if course.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="A deleted course cannot be archived; restore it first.")
+    course.archived_at = course.archived_at or datetime.now(timezone.utc)
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard?notice=course_archived", status_code=303)
+
+
+@app.post("/admin/learning/courses/{course_id}/restore")
+def admin_restore_course(course_id: int, db: Session = Depends(get_db)):
+    course = _course_or_404(db, course_id)
+    course.archived_at = None
+    course.deleted_at = None
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard?notice=course_restored", status_code=303)
+
+
+@app.get("/admin/learning/courses/{course_id}/delete")
+def admin_delete_course_page(request: Request, course_id: int, db: Session = Depends(get_db)):
+    course = _course_or_404(db, course_id)
+    return _confirm_page(
+        request,
+        title="Delete course",
+        heading=f"Move the course “{course.name}” to Recently deleted?",
+        item_summary=f"{course.name} ({course.code})",
+        consequences=[
+            "Students immediately lose access to the course.",
+            "Its modules, documents, generated content and student assignments are kept, not deleted.",
+            "Quiz results and student review history are not changed.",
+            "You can restore the course from Recently deleted.",
+        ],
+        action_url=f"/admin/learning/courses/{course_id}/delete",
+        button_label="Move to Recently deleted",
+        cancel_url="/admin/learning/dashboard",
+    )
+
+
+@app.post("/admin/learning/courses/{course_id}/delete")
+def admin_delete_course(course_id: int, confirm: str = Form(""), db: Session = Depends(get_db)):
+    _require_confirmation(confirm)
+    course = _course_or_404(db, course_id)
+    course.deleted_at = course.deleted_at or datetime.now(timezone.utc)
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard?notice=course_deleted", status_code=303)
+
+
+def _course_purge_blockers(db: Session, course: Course) -> list[str]:
+    checks = [
+        (db.query(LearningModule).filter(LearningModule.course_id == course.id).count(), "module(s)"),
+        (db.query(Document).filter(Document.course_id == course.id).count(), "document(s)"),
+        (db.query(Flashcard).filter(Flashcard.course_id == course.id).count()
+         + db.query(GeneratedQuestion).filter(GeneratedQuestion.course_id == course.id).count(),
+         "assigned flashcard(s) or question(s)"),
+        (db.query(StudentAccountEnrollment).filter(StudentAccountEnrollment.course_id == course.id).count()
+         + db.query(StudentEnrollment).filter(StudentEnrollment.course_id == course.id).count(),
+         "student assignment record(s)"),
+    ]
+    return [f"The course still has {count} {label}." for count, label in checks if count]
+
+
+@app.get("/admin/learning/courses/{course_id}/purge")
+def admin_purge_course_page(request: Request, course_id: int, db: Session = Depends(get_db)):
+    course = _course_or_404(db, course_id)
+    blockers = _course_purge_blockers(db, course)
+    if course.deleted_at is None:
+        blockers.insert(0, "Move the course to Recently deleted first.")
+    return _confirm_page(
+        request,
+        title="Delete course permanently",
+        heading=f"Permanently delete “{course.name}”?",
+        item_summary=f"{course.name} ({course.code})",
+        consequences=["Only an empty course can be deleted permanently; this cannot be undone."],
+        blockers=blockers,
+        action_url=f"/admin/learning/courses/{course_id}/purge",
+        button_label="Delete permanently",
+        cancel_url="/admin/learning/dashboard",
+    )
+
+
+@app.post("/admin/learning/courses/{course_id}/purge")
+def admin_purge_course(course_id: int, confirm: str = Form(""), db: Session = Depends(get_db)):
+    _require_confirmation(confirm)
+    course = _course_or_404(db, course_id)
+    if course.deleted_at is None:
+        raise HTTPException(status_code=409, detail="Move the course to Recently deleted before deleting it permanently.")
+    blockers = _course_purge_blockers(db, course)
+    if blockers:
+        raise HTTPException(status_code=409, detail="Permanent deletion is blocked: " + " ".join(blockers))
+    db.delete(course)
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard?notice=course_purged", status_code=303)
+
+
+# ------------------------------------------------ module / document archive
+
+@app.post("/admin/learning/modules/{module_id}/archive")
+def admin_archive_module(module_id: int, db: Session = Depends(get_db)):
+    module = db.get(LearningModule, module_id)
+    if module is None:
+        raise HTTPException(status_code=404, detail="Module not found.")
+    module.archived_at = module.archived_at or datetime.now(timezone.utc)
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/modules/{module_id}/restore")
+def admin_restore_module(module_id: int, db: Session = Depends(get_db)):
+    module = db.get(LearningModule, module_id)
+    if module is None:
+        raise HTTPException(status_code=404, detail="Module not found.")
+    module.archived_at = None
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/documents/{document_id}/archive")
+def admin_archive_document(document_id: int, db: Session = Depends(get_db)):
+    """Hide a source document from students and from new generation. Its file,
+    versions and every provenance link from generated content are kept."""
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    document.is_archived = True
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/documents/{document_id}/restore")
+def admin_restore_document(document_id: int, db: Session = Depends(get_db)):
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    document.is_archived = False
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+def _admin_redirect(next_url: str | None, default: str = "/admin/content") -> RedirectResponse:
+    """Redirect back within the teacher area only (never to another site)."""
+    if next_url and next_url.startswith("/admin/") and "\\" not in next_url and "//" not in next_url:
+        return RedirectResponse(url=next_url, status_code=303)
+    return RedirectResponse(url=default, status_code=303)
 
 
 @app.post("/admin/learning/flashcards/{flashcard_id}/edit")
@@ -1417,6 +2032,7 @@ def admin_edit_generated_flashcard(
     back: str = Form(...),
     explanation: str = Form(""),
     topic: str = Form(""),
+    next: str = Form("/admin/content"),
     db: Session = Depends(get_db),
 ):
     flashcard = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
@@ -1430,26 +2046,8 @@ def admin_edit_generated_flashcard(
     flashcard.back = clean_back
     flashcard.explanation = explanation.strip()
     flashcard.topic = topic.strip()[:150]
-    flashcard.approval_status = "PENDING"
     db.commit()
-    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
-
-
-@app.post("/admin/learning/questions/{question_id}/status")
-def admin_set_generated_question_status(
-    question_id: int,
-    status: str = Form(...),
-    db: Session = Depends(get_db),
-):
-    question = db.query(GeneratedQuestion).filter(GeneratedQuestion.id == question_id).first()
-    if question is None:
-        raise HTTPException(status_code=404, detail="Generated question not found.")
-    clean_status = status.strip().upper()
-    if clean_status not in {"DRAFT", "PENDING", "APPROVED", "REJECTED"}:
-        raise HTTPException(status_code=400, detail="Invalid question approval status.")
-    question.approval_status = clean_status
-    db.commit()
-    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return _admin_redirect(next)
 
 
 @app.post("/admin/learning/questions/{question_id}/edit")
@@ -1461,6 +2059,7 @@ def admin_edit_generated_question(
     correct_answer: str = Form(...),
     explanation: str = Form(""),
     topic: str = Form(""),
+    next: str = Form("/admin/content"),
     db: Session = Depends(get_db),
 ):
     question = db.query(GeneratedQuestion).filter(GeneratedQuestion.id == question_id).first()
@@ -1506,9 +2105,11 @@ def admin_edit_generated_question(
     question.correct_answer = json.dumps(correct, ensure_ascii=False)
     question.explanation = explanation.strip()
     question.topic = topic.strip()[:150]
-    question.approval_status = "PENDING"
+    # Quiz questions imported earlier are independent copies (and past
+    # responses keep their own snapshots), so this edit never changes a
+    # quiz or a recorded attempt.
     db.commit()
-    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return _admin_redirect(next)
 
 
 @app.post("/admin/learning/questions/{question_id}/add-to-quiz")
@@ -1517,12 +2118,11 @@ def admin_add_generated_question_to_quiz(
     quiz_id: int = Form(...),
     db: Session = Depends(get_db),
 ):
-    generated = db.query(GeneratedQuestion).filter(
-        GeneratedQuestion.id == question_id,
-        GeneratedQuestion.approval_status == "APPROVED",
-    ).first()
+    generated = db.query(GeneratedQuestion).filter(GeneratedQuestion.id == question_id).first()
     if generated is None:
-        raise HTTPException(status_code=409, detail="Approve the generated question before adding it to a quiz.")
+        raise HTTPException(status_code=404, detail="Generated question not found.")
+    if generated.archived_at is not None or generated.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="Restore the archived or deleted question before adding it to a quiz.")
     quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
     if quiz is None:
         raise HTTPException(status_code=404, detail="Quiz not found.")
@@ -1660,6 +2260,8 @@ async def admin_create_module(
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
+    if course.archived_at is not None or course.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="Restore the course before adding modules to it.")
     clean_title = (title or "").strip()
     if not clean_title:
         raise HTTPException(status_code=400, detail="Module title is required.")
@@ -1785,10 +2387,8 @@ def admin_inspect_document(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.is_archived.is_(False),
-    ).first()
+    # Teacher view: archived documents stay inspectable (they keep provenance).
+    document = db.query(Document).filter(Document.id == document_id).first()
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found.")
     version = (
@@ -1817,10 +2417,7 @@ def admin_download_source_document(
     document_id: int,
     db: Session = Depends(get_db),
 ):
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.is_archived.is_(False),
-    ).first()
+    document = db.query(Document).filter(Document.id == document_id).first()
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found.")
     root = LEARNING_UPLOADS_DIR.resolve()
@@ -1907,7 +2504,7 @@ def _create_document_flashcards(
             topic=item["topic"] or document.title,
             source_reference=item["source_reference"],
             source_passage_id=item.get("source_passage_id"),
-            approval_status="PENDING",
+            approval_status="SAVED",
             ai_provider=generated.provider,
             ai_model=generated.model,
         )
@@ -1962,7 +2559,7 @@ def _create_document_questions(
             topic=item["topic"] or document.title,
             source_reference=item["source_reference"],
             source_passage_id=item.get("source_passage_id"),
-            approval_status="PENDING",
+            approval_status="SAVED",
             ai_provider=generated.provider,
             ai_model=generated.model,
         )
@@ -1985,10 +2582,10 @@ def admin_generate_flashcards(
     document, version = _document_for_generation(db, document_id)
     cards = _create_document_flashcards(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
     passages = _version_passages(version)
     return JSONResponse({
-        "status": "pending_review",
+        "status": "saved",
         "generated": len(cards),
         "provider": cards[0].ai_provider if cards else None,
         "model": cards[0].ai_model if cards else None,
@@ -1998,7 +2595,7 @@ def admin_generate_flashcards(
                 "front": card.front,
                 "back": card.back,
                 "source_reference": card.source_reference,
-                "approval_status": card.approval_status,
+                "lifecycle": _content_status(card)["key"],
                 "source": _content_provenance(card, passages),
             }
             for card in cards
@@ -2016,10 +2613,10 @@ def admin_generate_questions(
     document, version = _document_for_generation(db, document_id)
     questions = _create_document_questions(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
     passages = _version_passages(version)
     return JSONResponse({
-        "status": "pending_review",
+        "status": "saved",
         "generated": len(questions),
         "provider": questions[0].ai_provider if questions else None,
         "model": questions[0].ai_model if questions else None,
@@ -2029,7 +2626,7 @@ def admin_generate_questions(
                 "question_text": item.question_text,
                 "question_type": item.question_type,
                 "source_reference": item.source_reference,
-                "approval_status": item.approval_status,
+                "lifecycle": _content_status(item)["key"],
                 "source": _content_provenance(item, passages),
             }
             for item in questions
@@ -2048,10 +2645,10 @@ def admin_generate_module_flashcards(
     document, version = _document_for_generation(db, document_id, module_id)
     cards = _create_document_flashcards(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
     passages = _version_passages(version)
     return JSONResponse({
-        "status": "pending_review",
+        "status": "saved",
         "generated": len(cards),
         "flashcards": [
             {"id": card.id, "front": card.front, "source": _content_provenance(card, passages)}
@@ -2071,26 +2668,16 @@ def admin_generate_module_questions(
     document, version = _document_for_generation(db, document_id, module_id)
     questions = _create_document_questions(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
     passages = _version_passages(version)
     return JSONResponse({
-        "status": "pending_review",
+        "status": "saved",
         "generated": len(questions),
         "questions": [
             {"id": item.id, "question_text": item.question_text, "source": _content_provenance(item, passages)}
             for item in questions
         ],
     })
-
-
-@app.post("/admin/learning/flashcards/{flashcard_id}/approve")
-async def admin_approve_flashcard(flashcard_id: int, db: Session = Depends(get_db)):
-    flashcard = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
-    if not flashcard:
-        raise HTTPException(status_code=404, detail="Flashcard not found")
-    flashcard.approval_status = "APPROVED"
-    db.commit()
-    return JSONResponse({"status": "ok", "flashcard_id": flashcard.id, "approval_status": flashcard.approval_status})
 
 
 @app.post("/student/enrollments")
@@ -2114,10 +2701,7 @@ def student_flashcards(
     now = datetime.now(timezone.utc)
     cards = []
     for module in modules:
-        query = db.query(Flashcard).filter(
-            Flashcard.module_id == module.id,
-            Flashcard.approval_status == "APPROVED",
-        )
+        query = db.query(Flashcard).filter(*_student_visible_content(Flashcard, module))
         for flashcard in query.order_by(Flashcard.id).all():
             progress = db.query(StudentAccountFlashcardProgress).filter(
                 StudentAccountFlashcardProgress.account_id == account.id,

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Practice questions · {{ app_name }}{% endblock %}
+
+{% block extra_head %}
+<style>
+  .practice-shell { max-width: 900px; }
+  .practice-meta { color: var(--sq-text-dim); font-size: .9rem; }
+  .practice-card { border: 1px solid var(--sq-glass-border); border-radius: 16px; padding: 1rem; background: rgba(255,255,255,.035); }
+  .practice-card summary { cursor: pointer; font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<main class="container practice-shell py-4 py-md-5">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+    <div>
+      <p class="sq-eyebrow mb-2">Student learning</p>
+      <h1 class="h2 mb-0">Practice questions</h1>
+    </div>
+    <a class="btn btn-sq btn-sq-outline" href="/student/dashboard">Back to my learning</a>
+  </div>
+  {% for section in sections %}
+  <section class="sq-card p-4 mb-4">
+    <h2 class="h4 mb-3">{{ section.module.title }} <span class="practice-meta">· {{ section.module.course.name }}</span></h2>
+    {% for question in section.questions %}
+    <article class="practice-card mb-3">
+      <p class="mb-2"><strong>{{ loop.index }}.</strong> {{ question.text }}</p>
+      {% if question.options %}
+      <ol type="A" class="mb-2">{% for option in question.options %}<li>{{ option }}</li>{% endfor %}</ol>
+      {% endif %}
+      <details>
+        <summary>Show answer</summary>
+        <p class="mt-2 mb-1">Answer: {% if question.answer is string %}{{ question.answer }}{% else %}{{ question.answer|join(" / ") }}{% endif %}</p>
+        {% if question.explanation %}<p class="practice-meta mb-0">{{ question.explanation }}</p>{% endif %}
+      </details>
+    </article>
+    {% endfor %}
+  </section>
+  {% else %}
+  <div class="sq-card"><h2 class="h5">No practice questions yet</h2><p class="mb-0">Your teacher has not published practice questions for your courses yet.</p></div>
+  {% endfor %}
+</main>
+{% endblock %}

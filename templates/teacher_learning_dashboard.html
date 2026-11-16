@@ -20,13 +20,26 @@
     <span data-copy-status></span>
   </p>
 
+  {% set notices = {"course_archived": "Course archived. Students can no longer reach it; everything in it is kept.", "course_restored": "Course restored.", "course_deleted": "Course moved to Recently deleted. Its modules, documents, content and enrollments are kept.", "course_purged": "Empty course permanently deleted."} %}
+  {% if notice and notices.get(notice) %}<div class="alert alert-info" role="status">{{ notices[notice] }}</div>{% endif %}
+
+  <section class="sq-card p-4 mb-4 d-flex flex-wrap justify-content-between align-items-center gap-3">
+    <div>
+      <h2 class="h5 mb-1">Content bank</h2>
+      <p class="mb-0 text-secondary">Generated content is saved automatically and stays private until you assign and publish it.
+        {{ unassigned_count.flashcards }} flashcard(s) and {{ unassigned_count.questions }} question(s) are waiting to be assigned.</p>
+    </div>
+    <a class="btn btn-sq btn-sq-primary" href="/admin/content?status=unassigned">Open content bank</a>
+  </section>
+
   <section class="sq-card p-4 mb-4">
     <h2 class="h4">Create a course</h2>
     <form method="post" action="/admin/learning/courses" class="row g-3">
       <div class="col-md-4"><label class="form-label" for="course-name">Course name</label><input id="course-name" class="form-control" name="name" maxlength="200" required></div>
       <div class="col-md-3"><label class="form-label" for="course-code">Course code</label><input id="course-code" class="form-control" name="code" maxlength="50" required></div>
       <div class="col-md-5"><label class="form-label" for="course-description">Description</label><input id="course-description" class="form-control" name="description"></div>
-      <div class="col-12"><button class="btn btn-sq btn-sq-primary" type="submit">Create course</button></div>
+      <div class="col-12"><button class="btn btn-sq btn-sq-primary" type="submit">Create draft course</button>
+        <span class="small text-secondary ms-2">New courses start as drafts. Publish a course when students should see it.</span></div>
     </form>
   </section>
 
@@ -36,7 +49,7 @@
       <div class="col-md-4"><label class="form-label" for="module-course">Course</label>
         <select id="module-course" class="form-select" name="course_id" required>
           <option value="">Choose a course</option>
-          {% for course in courses %}<option value="{{ course.id }}">{{ course.name }} ({{ course.code }})</option>{% endfor %}
+          {% for course in active_courses %}<option value="{{ course.id }}">{{ course.name }} ({{ course.code }})</option>{% endfor %}
         </select>
       </div>
       <div class="col-md-4"><label class="form-label" for="module-title">Module title</label><input id="module-title" class="form-control" name="title" maxlength="200" required></div>
@@ -55,10 +68,27 @@
       <div class="col-md-4"><label class="form-label">Description</label><input class="form-control" name="description" value="{{ course.description }}"></div>
       <div class="col-md-1"><button class="btn btn-sq btn-sq-outline w-100" type="submit">Save</button></div>
     </form>
-    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top pt-3">
-      <h3 class="h5 mb-0">{{ course.name }} <span class="text-secondary">· {{ course.code }}</span></h3>
-      <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/student-accounts">Assign students</a>
+    {% set cstatus = course_status(course) %}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top pt-3" data-course="{{ course.id }}">
+      <h3 class="h5 mb-0">{{ course.name }} <span class="text-secondary">· {{ course.code }}</span>
+        <span class="badge {{ cstatus.badge }}" data-course-status>{{ cstatus.label }}</span></h3>
+      <div class="d-flex flex-wrap gap-2">
+        {% if cstatus.key in ["draft", "published"] %}
+        <form method="post" action="/admin/learning/courses/{{ course.id }}/status">
+          <input type="hidden" name="status" value="{{ 'DRAFT' if course.status == 'PUBLISHED' else 'PUBLISHED' }}">
+          <button class="btn btn-sm {% if course.status == 'PUBLISHED' %}btn-sq btn-sq-outline{% else %}btn-success{% endif %}" type="submit">{{ "Unpublish course" if course.status == "PUBLISHED" else "Publish course" }}</button>
+        </form>
+        <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/student-accounts">Assign students</a>
+        <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/content?course_id={{ course.id }}&status=all">Course content</a>
+        <form method="post" action="/admin/learning/courses/{{ course.id }}/archive"><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Archive</button></form>
+        {% else %}
+        <form method="post" action="/admin/learning/courses/{{ course.id }}/restore"><button class="btn btn-sm btn-success" type="submit">Restore course</button></form>
+        {% endif %}
+        <a class="btn btn-sm btn-outline-danger" href="/admin/learning/courses/{{ course.id }}/delete">Delete…</a>
+      </div>
     </div>
+    {% if cstatus.key == "draft" %}<p class="small text-warning mt-2 mb-0">Draft course: students cannot see any of its modules or content yet.</p>{% endif %}
+    {% if cstatus.key == "archived" %}<p class="small text-secondary mt-2 mb-0">Archived: hidden from students. Modules, documents and content are kept and return when you restore the course.</p>{% endif %}
     {% set course_module_count = namespace(value=0) %}
     {% for row in module_rows if row.module.course_id == course.id %}
     {% set course_module_count.value = course_module_count.value + 1 %}
@@ -68,15 +98,23 @@
         <div>
           <h4 class="h5 mb-1">{{ module.title }}</h4>
           <span class="badge {% if module.status == 'PUBLISHED' %}text-bg-success{% else %}text-bg-warning{% endif %}">{{ module.status }}</span>
+          {% if module.archived_at %}<span class="badge text-bg-secondary">ARCHIVED</span>{% endif %}
           <p class="text-secondary mt-2 mb-0">{{ module.description or "No description" }}</p>
         </div>
-        <form method="post" action="/admin/learning/modules/{{ module.id }}/status">
-          <input type="hidden" name="status" value="{{ 'DRAFT' if module.status == 'PUBLISHED' else 'PUBLISHED' }}">
-          <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">{{ "Unpublish" if module.status == "PUBLISHED" else "Publish" }}</button>
-        </form>
+        <div class="d-flex gap-2">
+          {% if not module.archived_at %}
+          <form method="post" action="/admin/learning/modules/{{ module.id }}/status">
+            <input type="hidden" name="status" value="{{ 'DRAFT' if module.status == 'PUBLISHED' else 'PUBLISHED' }}">
+            <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">{{ "Unpublish" if module.status == "PUBLISHED" else "Publish" }}</button>
+          </form>
+          <form method="post" action="/admin/learning/modules/{{ module.id }}/archive"><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Archive module</button></form>
+          {% else %}
+          <form method="post" action="/admin/learning/modules/{{ module.id }}/restore"><button class="btn btn-sm btn-success" type="submit">Restore module</button></form>
+          {% endif %}
+        </div>
       </div>
       <form method="post" action="/admin/learning/modules/{{ module.id }}/edit" class="row g-2 mt-2">
-        <div class="col-md-3"><label class="form-label small">Course</label><select class="form-select form-select-sm" name="course_id" required>{% for item in courses %}<option value="{{ item.id }}" {% if item.id == module.course_id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
+        <div class="col-md-3"><label class="form-label small">Course</label><select class="form-select form-select-sm" name="course_id" required>{% for item in courses if not item.archived_at or item.id == module.course_id %}<option value="{{ item.id }}" {% if item.id == module.course_id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
         <div class="col-md-3"><label class="form-label small">Title</label><input class="form-control form-control-sm" name="title" value="{{ module.title }}" required></div>
         <div class="col-md-3"><label class="form-label small">Description</label><input class="form-control form-control-sm" name="description" value="{{ module.description }}"></div>
         <div class="col-md-3"><label class="form-label small">Objectives</label><input class="form-control form-control-sm" name="learning_objectives" value="{{ module.learning_objectives }}"></div>
@@ -91,7 +129,9 @@
             <strong>{{ document.title }}</strong>
             <span class="badge text-bg-secondary">{{ document.extraction_status }}</span>
             <div class="text-secondary">{{ document.file_size_bytes }} bytes · {{ document.extracted_text|length }} extracted characters</div>
-            <a href="/admin/learning/documents/{{ document.id }}">Inspect source</a>
+            <a href="/admin/learning/documents/{{ document.id }}">Inspect source</a> ·
+            <a href="/admin/content?document_id={{ document.id }}&status=all">Generated content</a>
+            <form method="post" action="/admin/learning/documents/{{ document.id }}/archive" class="d-inline"><button class="btn btn-link btn-sm p-0 align-baseline" type="submit">Archive</button></form>
             {% if document.extraction_status == "EXTRACTED" and document.extracted_text %}
             <form method="post" action="/admin/learning/modules/{{ module.id }}/generate/flashcards" class="row g-2 mt-1">
               <input type="hidden" name="document_id" value="{{ document.id }}">
@@ -114,69 +154,26 @@
             <input class="form-control form-control-sm mb-2" name="title" placeholder="Display title">
             <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Upload document</button>
           </form>
+          {% if row.archived_documents %}
+          <details class="mt-2"><summary class="small">Archived documents ({{ row.archived_documents|length }})</summary>
+            {% for document in row.archived_documents %}
+            <div class="small border-top py-1">{{ document.title }} · <a href="/admin/learning/documents/{{ document.id }}">Inspect</a>
+              <form method="post" action="/admin/learning/documents/{{ document.id }}/restore" class="d-inline"><button class="btn btn-link btn-sm p-0 align-baseline" type="submit">Restore</button></form></div>
+            {% endfor %}
+          </details>
+          {% endif %}
         </div>
-        <div class="col-lg-4">
-          <h5 class="h6">Flashcards ({{ row.flashcards|length }})</h5>
-          {% for card in row.flashcards %}
-          <div class="small border-top py-2">
-            <span class="badge {% if card.approval_status == 'APPROVED' %}text-bg-success{% elif card.approval_status == 'REJECTED' %}text-bg-danger{% else %}text-bg-warning{% endif %}">{{ "Pending review" if card.approval_status in ["PENDING", "DRAFT"] else card.approval_status }}</span>
-            <p class="mt-1 mb-1"><strong>{{ card.front }}</strong><br>{{ card.back }}</p>
-            <p class="text-secondary mb-1">{{ card.explanation }} · {{ card.topic }}</p>
-            {% if card.source_document_id %}<a href="/admin/learning/documents/{{ card.source_document_id }}">Source document #{{ card.source_document_id }}</a>{% else %}<span>No source document</span>{% endif %}
-            <span class="text-secondary">· {{ card.source_reference }} · {{ card.ai_provider or "manual" }} {{ card.ai_model or "" }}</span>
-            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/edit" class="mt-2">
-              <label class="form-label small" for="card-front-{{ card.id }}">Edit prompt</label>
-              <textarea id="card-front-{{ card.id }}" class="form-control form-control-sm mb-1" name="front" rows="2" required>{{ card.front }}</textarea>
-              <label class="form-label small" for="card-back-{{ card.id }}">Edit answer</label>
-              <textarea id="card-back-{{ card.id }}" class="form-control form-control-sm mb-1" name="back" rows="3" required>{{ card.back }}</textarea>
-              <input class="form-control form-control-sm mb-1" name="explanation" value="{{ card.explanation }}" aria-label="Explanation">
-              <input class="form-control form-control-sm mb-1" name="topic" value="{{ card.topic }}" aria-label="Topic">
-              <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save edits</button>
-            </form>
-            <div class="d-flex gap-2 mt-2">
-            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/status"><input type="hidden" name="status" value="APPROVED"><button class="btn btn-sm btn-success" type="submit">Approve</button></form>
-            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/status"><input type="hidden" name="status" value="REJECTED"><button class="btn btn-sm btn-outline-danger" type="submit">Reject</button></form>
+        <div class="col-lg-8">
+          <h5 class="h6">Content in this module</h5>
+          <div class="row g-2">
+            {% for kind, label in [("flashcards", "Flashcards"), ("questions", "Quiz questions")] %}
+            <div class="col-sm-6"><div class="border rounded-3 p-2 small" data-module-content="{{ kind }}">
+              <strong>{{ label }}</strong>: {{ row.content_counts[kind].assigned }} assigned · {{ row.content_counts[kind].live }} live for students
+              <div><a href="/admin/content?kind={{ kind }}&course_id={{ module.course_id }}&status=all">Manage in content bank</a></div>
+            </div></div>
+            {% endfor %}
           </div>
-          {% else %}<p class="small text-secondary">No flashcards available.</p>{% endfor %}
-        </div>
-        <div class="col-lg-4">
-          <h5 class="h6">Generated questions ({{ row.questions|length }})</h5>
-          {% for question in row.questions %}
-          <div class="small border-top py-2">
-            <span class="badge {% if question.approval_status == 'APPROVED' %}text-bg-success{% elif question.approval_status == 'REJECTED' %}text-bg-danger{% else %}text-bg-warning{% endif %}">{{ "Pending review" if question.approval_status in ["PENDING", "DRAFT"] else question.approval_status }}</span>
-            <p class="mt-1 mb-1"><strong>{{ question.question_text }}</strong></p>
-            <p class="text-secondary mb-1">Type: {{ question.question_type }} · Answer: {{ question.correct_answer }} · {{ question.explanation }}</p>
-            {% if question.source_document_id %}<a href="/admin/learning/documents/{{ question.source_document_id }}">Source document #{{ question.source_document_id }}</a>{% else %}<span>No source document</span>{% endif %}
-            <span class="text-secondary">· {{ question.source_reference }} · {{ question.ai_provider or "manual" }} {{ question.ai_model or "" }}</span>
-            <form method="post" action="/admin/learning/questions/{{ question.id }}/edit" class="mt-2">
-              <label class="form-label small" for="generated-question-{{ question.id }}">Edit question</label>
-              <textarea id="generated-question-{{ question.id }}" class="form-control form-control-sm mb-1" name="question_text" rows="2" required>{{ question.question_text }}</textarea>
-              <label class="form-label small" for="generated-type-{{ question.id }}">Question type</label>
-              <select id="generated-type-{{ question.id }}" class="form-select form-select-sm mb-1" name="question_type">
-                {% for kind in ["mcq_single", "true_false", "short_answer"] %}<option value="{{ kind }}" {% if question.question_type == kind %}selected{% endif %}>{{ kind }}</option>{% endfor %}
-              </select>
-              <label class="form-label small" for="generated-options-{{ question.id }}">Options (JSON)</label>
-              <textarea id="generated-options-{{ question.id }}" class="form-control form-control-sm mb-1" name="answer_options" rows="2">{{ question.answer_options }}</textarea>
-              <label class="form-label small" for="generated-answer-{{ question.id }}">Correct answer (JSON)</label>
-              <textarea id="generated-answer-{{ question.id }}" class="form-control form-control-sm mb-1" name="correct_answer" rows="2">{{ question.correct_answer }}</textarea>
-              <label class="form-label small" for="generated-explanation-{{ question.id }}">Explanation</label>
-              <textarea id="generated-explanation-{{ question.id }}" class="form-control form-control-sm mb-1" name="explanation" rows="2">{{ question.explanation }}</textarea>
-              <input class="form-control form-control-sm mb-1" name="topic" value="{{ question.topic }}" aria-label="Topic">
-              <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save edits</button>
-            </form>
-            <div class="d-flex flex-wrap gap-2 mt-2">
-              <form method="post" action="/admin/learning/questions/{{ question.id }}/status"><input type="hidden" name="status" value="APPROVED"><button class="btn btn-sm btn-success" type="submit">Approve</button></form>
-              <form method="post" action="/admin/learning/questions/{{ question.id }}/status"><input type="hidden" name="status" value="REJECTED"><button class="btn btn-sm btn-outline-danger" type="submit">Reject</button></form>
-              {% if question.approval_status == "APPROVED" %}
-              <form method="post" action="/admin/learning/questions/{{ question.id }}/add-to-quiz" class="d-flex gap-1">
-                <select class="form-select form-select-sm" name="quiz_id" aria-label="Draft quiz" required>
-                  {% for quiz in draft_quizzes %}<option value="{{ quiz.id }}">{{ quiz.title }}</option>{% endfor %}
-                </select>
-                <button class="btn btn-sm btn-sq btn-sq-outline" type="submit" {% if not draft_quizzes %}disabled{% endif %}>Add to quiz</button>
-            </form>
-            {% endif %}
-          </div>
-          {% else %}<p class="small text-secondary">No generated questions available.</p>{% endfor %}
+          <p class="small text-secondary mt-2 mb-0">Generating from a document saves new items to the content bank. Assign them to this module and publish them there.</p>
         </div>
       </div>
       <details class="mt-3">
@@ -189,7 +186,7 @@
               {% for progress in row.progress_rows %}
               <tr>
                 <td>{{ progress.account.full_name }} <span class="text-secondary">({{ progress.account.student_code }})</span></td>
-                <td>{{ progress.reviewed_count }} / {{ row.flashcards|selectattr("approval_status", "equalto", "APPROVED")|list|length }}</td>
+                <td>{{ progress.reviewed_count }} / {{ row.live_flashcard_count }}</td>
                 <td>{{ progress.due_count }}</td>
                 <td>{{ progress.review_count }}</td>
                 <td>{% if progress.last_reviewed_at %}{{ progress.last_reviewed_at.strftime("%Y-%m-%d %H:%M") }}{% else %}Not started{% endif %}</td>
@@ -207,6 +204,22 @@
   {% else %}
   <section class="sq-card p-4"><p class="mb-0">No courses yet. Create a course to start organizing learning materials.</p></section>
   {% endfor %}
+
+  {% if deleted_courses %}
+  <section class="sq-card p-4 mb-4" id="recently-deleted-courses">
+    <h2 class="h4">Recently deleted courses</h2>
+    <p class="small text-secondary">Deleted courses are hidden from students. Their modules, documents, content and enrollments are kept until you restore the course. Only an empty course can be deleted permanently.</p>
+    {% for course in deleted_courses %}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top py-2">
+      <span>{{ course.name }} <span class="text-secondary">· {{ course.code }}</span> <span class="badge text-bg-dark">Deleted</span></span>
+      <span class="d-flex gap-2">
+        <form method="post" action="/admin/learning/courses/{{ course.id }}/restore"><button class="btn btn-sm btn-success" type="submit">Restore</button></form>
+        <a class="btn btn-sm btn-outline-danger" href="/admin/learning/courses/{{ course.id }}/purge">Delete permanently…</a>
+      </span>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
 </div>
 {% endblock %}
 

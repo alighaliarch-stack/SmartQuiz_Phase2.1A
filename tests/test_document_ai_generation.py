@@ -63,7 +63,7 @@ class DocumentAIGenerationTests(unittest.TestCase):
             key=auth.PASSWORD_HASH_KEY,
             value=auth.hash_password("Teacher-test-password-2026"),
         ))
-        self.course = models.Course(name="Biology", code="BIO", description="")
+        self.course = models.Course(name="Biology", code="BIO", description="", status="PUBLISHED")
         db.add(self.course)
         db.flush()
         self.module = models.LearningModule(
@@ -399,26 +399,21 @@ class DocumentAIGenerationTests(unittest.TestCase):
         saved_questions = db.query(models.GeneratedQuestion).filter(
             models.GeneratedQuestion.id.in_(question_ids)
         ).order_by(models.GeneratedQuestion.id).all()
-        self.assertTrue(all(card.approval_status == "PENDING" for card in saved_cards))
+        # Phase 3B: generated content is saved automatically, unassigned and unpublished.
+        self.assertTrue(all(card.course_id is None and not card.is_published for card in saved_cards))
+        self.assertTrue(all(card.approval_status == "SAVED" for card in saved_cards))
         self.assertTrue(all(card.source_document_id == document_id for card in saved_cards))
         self.assertTrue(all(card.source_document_version_id is not None for card in saved_cards))
         self.assertTrue(all(card.source_reference == "P1 · Paragraph 1" for card in saved_cards))
         self.assertTrue(all(card.source_passage_id == "P1" for card in saved_cards))
         self.assertTrue(all(card.ai_provider == "gemini" and card.ai_model == "test-model" for card in saved_cards))
-        self.assertTrue(all(question.approval_status == "PENDING" for question in saved_questions))
+        self.assertTrue(all(question.course_id is None and not question.is_published for question in saved_questions))
         self.assertTrue(all(question.source_document_id == document_id for question in saved_questions))
         self.assertTrue(all(question.source_document_version_id is not None for question in saved_questions))
         self.assertTrue(all(question.source_reference == "P1 · Paragraph 1" for question in saved_questions))
         self.assertTrue(all(question.source_passage_id == "P1" for question in saved_questions))
         self.assertTrue(all(question.ai_provider == "gemini" and question.ai_model == "test-model" for question in saved_questions))
         db.close()
-
-        denied_add = self.client.post(
-            f"/admin/learning/questions/{question_ids[0]}/add-to-quiz",
-            data={"quiz_id": self.quiz_id},
-            follow_redirects=False,
-        )
-        self.assertEqual(denied_add.status_code, 409)
 
         card_edit = self.client.post(
             f"/admin/learning/flashcards/{card_ids[0]}/edit",
@@ -432,25 +427,18 @@ class DocumentAIGenerationTests(unittest.TestCase):
         )
         self.assertEqual(card_edit.status_code, 303)
         db = self.Session()
-        self.assertEqual(
-            db.query(models.Flashcard).filter_by(id=card_ids[0]).one().approval_status,
-            "PENDING",
-        )
+        edited_card = db.query(models.Flashcard).filter_by(id=card_ids[0]).one()
+        self.assertEqual(edited_card.front, "How does cellular respiration form ATP?")
+        self.assertIsNone(edited_card.course_id)  # editing does not assign or publish
         db.close()
-        self.assertEqual(
-            self.client.post(
-                f"/admin/learning/flashcards/{card_ids[0]}/status",
-                data={"status": "APPROVED"},
-                follow_redirects=False,
-            ).status_code,
-            303,
+        assigned = self.client.post(
+            f"/admin/content/flashcards/{card_ids[0]}/assign",
+            data={"module_id": self.module_id, "publish": "true"},
+            follow_redirects=False,
         )
+        self.assertEqual(assigned.status_code, 303)
         self.assertEqual(
-            self.client.post(
-                f"/admin/learning/flashcards/{card_ids[1]}/status",
-                data={"status": "REJECTED"},
-                follow_redirects=False,
-            ).status_code,
+            self.client.post(f"/admin/content/flashcards/{card_ids[1]}/archive", follow_redirects=False).status_code,
             303,
         )
 
@@ -467,34 +455,16 @@ class DocumentAIGenerationTests(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertEqual(edited_question.status_code, 303)
-        db = self.Session()
         self.assertEqual(
-            db.query(models.GeneratedQuestion).filter_by(id=question_ids[0]).one().approval_status,
-            "PENDING",
-        )
-        db.close()
-        self.assertEqual(
-            self.client.post(
-                f"/admin/learning/questions/{question_ids[0]}/status",
-                data={"status": "APPROVED"},
-                follow_redirects=False,
-            ).status_code,
+            self.client.post(f"/admin/content/questions/{question_ids[1]}/archive", follow_redirects=False).status_code,
             303,
         )
-        self.assertEqual(
-            self.client.post(
-                f"/admin/learning/questions/{question_ids[1]}/status",
-                data={"status": "REJECTED"},
-                follow_redirects=False,
-            ).status_code,
-            303,
-        )
-        rejected_question = self.client.post(
+        archived_question = self.client.post(
             f"/admin/learning/questions/{question_ids[1]}/add-to-quiz",
             data={"quiz_id": self.quiz_id},
             follow_redirects=False,
         )
-        self.assertEqual(rejected_question.status_code, 409)
+        self.assertEqual(archived_question.status_code, 409)
         added = self.client.post(
             f"/admin/learning/questions/{question_ids[0]}/add-to-quiz",
             data={"quiz_id": self.quiz_id},
@@ -564,10 +534,14 @@ class DocumentAIGenerationTests(unittest.TestCase):
         )
 
         teacher_dashboard = self.client.get("/admin/learning/dashboard")
-        self.assertIn("Pending review", teacher_dashboard.text)
-        self.assertIn("REJECTED", teacher_dashboard.text)
-        self.assertIn("Source document", teacher_dashboard.text)
-        self.assertIn("Draft Biology Quiz", teacher_dashboard.text)
+        self.assertIn("1 assigned · 1 live for students", teacher_dashboard.text)
+        self.assertNotIn("Approve", teacher_dashboard.text)
+        bank = self.client.get("/admin/content?status=all")
+        self.assertIn("Live for students", bank.text)
+        self.assertIn("Archived", bank.text)
+        self.assertIn("Saved · not assigned", bank.text)
+        self.assertIn("Cell energy notes", bank.text)  # source document shown
+        self.assertIn("Draft Biology Quiz", bank.text)
 
     def test_ai_generation_fails_explicitly_without_provider_key(self):
         source = "[[SOURCE: Paragraph 1]]\nA sufficiently long source statement for learning."
