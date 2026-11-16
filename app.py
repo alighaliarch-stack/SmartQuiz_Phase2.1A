@@ -58,6 +58,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import ai_grading
 import auth
+import document_extraction
 import models  # noqa: F401  (registers models onto Base before init_db runs)
 import learning_content_ai
 from config import settings
@@ -1529,7 +1530,8 @@ def admin_add_generated_question_to_quiz(
         raise HTTPException(status_code=409, detail="Generated questions can only be added to a draft quiz.")
     existing = db.query(Question.id).filter(
         Question.quiz_id == quiz.id,
-        Question.question_text == generated.question_text,
+        (Question.generated_question_id == generated.id)
+        | (Question.question_text == generated.question_text),
     ).first()
     if existing is not None:
         return RedirectResponse(url=f"/admin/quizzes/{quiz.id}?success=question_already_added", status_code=303)
@@ -1575,6 +1577,11 @@ def admin_add_generated_question_to_quiz(
         correct_answer=json.dumps(correct_answer, ensure_ascii=False),
         created_at=datetime.now(timezone.utc),
         grading_notes=None,
+        generated_question_id=generated.id,
+        source_document_id=generated.source_document_id,
+        source_document_version_id=generated.source_document_version_id,
+        source_reference=generated.source_reference or None,
+        source_passage_id=generated.source_passage_id,
     ))
     db.commit()
     return RedirectResponse(url=f"/admin/quizzes/{quiz.id}?success=question_created", status_code=303)
@@ -1698,7 +1705,8 @@ async def admin_upload_document(
             handle.write(chunk)
     file.file.seek(0)
 
-    text, extraction_status, extraction_error = _extract_document_text(storage_path)
+    extraction = document_extraction.extract_document(storage_path)
+    text, extraction_status, extraction_error = extraction.text, extraction.status, extraction.error
     document = Document(
         course_id=module.course_id,
         module_id=module.id,
@@ -1727,6 +1735,9 @@ async def admin_upload_document(
         extraction_status=document.extraction_status,
         extraction_error=document.extraction_error,
         extracted_text=document.extracted_text,
+        source_passages=json.dumps(
+            [passage.metadata() for passage in extraction.passages], ensure_ascii=False
+        ) if extraction.passages else None,
         is_current=True,
     )
     db.add(version)
@@ -1895,6 +1906,7 @@ def _create_document_flashcards(
             explanation=item["explanation"],
             topic=item["topic"] or document.title,
             source_reference=item["source_reference"],
+            source_passage_id=item.get("source_passage_id"),
             approval_status="PENDING",
             ai_provider=generated.provider,
             ai_model=generated.model,
@@ -1949,6 +1961,7 @@ def _create_document_questions(
             explanation=item["explanation"],
             topic=item["topic"] or document.title,
             source_reference=item["source_reference"],
+            source_passage_id=item.get("source_passage_id"),
             approval_status="PENDING",
             ai_provider=generated.provider,
             ai_model=generated.model,
@@ -1973,6 +1986,7 @@ def admin_generate_flashcards(
     cards = _create_document_flashcards(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
         return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    passages = _version_passages(version)
     return JSONResponse({
         "status": "pending_review",
         "generated": len(cards),
@@ -1985,6 +1999,7 @@ def admin_generate_flashcards(
                 "back": card.back,
                 "source_reference": card.source_reference,
                 "approval_status": card.approval_status,
+                "source": _content_provenance(card, passages),
             }
             for card in cards
         ],
@@ -2002,6 +2017,7 @@ def admin_generate_questions(
     questions = _create_document_questions(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
         return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    passages = _version_passages(version)
     return JSONResponse({
         "status": "pending_review",
         "generated": len(questions),
@@ -2014,6 +2030,7 @@ def admin_generate_questions(
                 "question_type": item.question_type,
                 "source_reference": item.source_reference,
                 "approval_status": item.approval_status,
+                "source": _content_provenance(item, passages),
             }
             for item in questions
         ],
@@ -2032,10 +2049,14 @@ def admin_generate_module_flashcards(
     cards = _create_document_flashcards(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
         return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    passages = _version_passages(version)
     return JSONResponse({
         "status": "pending_review",
         "generated": len(cards),
-        "flashcards": [{"id": card.id, "front": card.front} for card in cards],
+        "flashcards": [
+            {"id": card.id, "front": card.front, "source": _content_provenance(card, passages)}
+            for card in cards
+        ],
     })
 
 
@@ -2051,10 +2072,14 @@ def admin_generate_module_questions(
     questions = _create_document_questions(db, document, version, count)
     if "text/html" in request.headers.get("accept", ""):
         return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    passages = _version_passages(version)
     return JSONResponse({
         "status": "pending_review",
         "generated": len(questions),
-        "questions": [{"id": item.id, "question_text": item.question_text} for item in questions],
+        "questions": [
+            {"id": item.id, "question_text": item.question_text, "source": _content_provenance(item, passages)}
+            for item in questions
+        ],
     })
 
 
@@ -2280,75 +2305,37 @@ def _validate_document_upload(file: UploadFile, max_bytes: int = 20 * 1024 * 102
 
 
 def _extract_document_text(path: Path) -> tuple[str, str, str | None]:
-    """Extract searchable text with stable page, slide, or paragraph citations."""
-    suffix = path.suffix.lower()
+    """Extract searchable text with per-passage source markers.
+
+    Thin compatibility wrapper; the structured extractor (passages with
+    paragraph/page/slide IDs) lives in document_extraction."""
+    result = document_extraction.extract_document(path)
+    return result.text, result.status, result.error
+
+
+def _version_passages(version: DocumentVersion | None) -> dict[str, dict]:
+    """Passage-ID -> location metadata for a version (empty for pre-Phase-3A versions)."""
+    if version is None or not version.source_passages:
+        return {}
     try:
-        sections: list[tuple[str, str]] = []
-        if suffix == ".txt":
-            data = path.read_bytes()
-            try:
-                text = data.decode("utf-8-sig", errors="strict")
-            except UnicodeDecodeError:
-                text = data.decode("latin-1", errors="strict")
-            paragraphs = [part.strip() for part in re.split(r"\r?\n\s*\r?\n", text) if part.strip()]
-            sections = [(f"Paragraph {index}", paragraph) for index, paragraph in enumerate(paragraphs, 1)]
-        elif suffix == ".pdf":
-            if path.read_bytes()[:5] != b"%PDF-":
-                return "", "ERROR", "Invalid PDF signature."
-            from pypdf import PdfReader
+        return {item["id"]: item for item in json.loads(version.source_passages) if isinstance(item, dict) and "id" in item}
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
-            reader = PdfReader(str(path), strict=False)
-            for page_number, page in enumerate(reader.pages, 1):
-                page_text = (page.extract_text() or "").strip()
-                if page_text:
-                    sections.append((f"Page {page_number}", page_text))
-        elif suffix == ".docx":
-            import zipfile
 
-            with zipfile.ZipFile(path) as archive:
-                xml = ET.fromstring(archive.read("word/document.xml"))
-            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-            active_section = ""
-            paragraph_number = 0
-            for paragraph in xml.iter(f"{namespace}p"):
-                paragraph_text = "".join(node.text or "" for node in paragraph.iter(f"{namespace}t")).strip()
-                if not paragraph_text:
-                    continue
-                paragraph_number += 1
-                style = paragraph.find(f"{namespace}pPr/{namespace}pStyle")
-                style_name = style.attrib.get(f"{namespace}val", "") if style is not None else ""
-                if style_name.lower().startswith("heading"):
-                    active_section = paragraph_text[:100]
-                reference = f"Section: {active_section}" if active_section else f"Paragraph {paragraph_number}"
-                sections.append((reference, paragraph_text))
-        elif suffix == ".pptx":
-            import zipfile
-
-            slide_pattern = re.compile(r"^ppt/slides/slide(\d+)\.xml$")
-            with zipfile.ZipFile(path) as archive:
-                slide_names = []
-                for name in archive.namelist():
-                    match = slide_pattern.match(name)
-                    if match:
-                        slide_names.append((int(match.group(1)), name))
-                for slide_number, name in sorted(slide_names):
-                    xml = ET.fromstring(archive.read(name))
-                    slide_text = " ".join(
-                        (node.text or "").strip()
-                        for node in xml.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t")
-                        if (node.text or "").strip()
-                    )
-                    if slide_text:
-                        sections.append((f"Slide {slide_number}", slide_text))
-        else:
-            return "", "ERROR", f"Unsupported document extension: {suffix or '(none)'}."
-    except Exception as exc:
-        return "", "ERROR", f"Could not extract text from the source document ({type(exc).__name__})."
-
-    extracted = "\n\n".join(f"[[SOURCE: {reference.replace(']]', ')')[:120]}]]\n{text}" for reference, text in sections)
-    if not extracted.strip():
-        return "", "NO_TEXT", "No extractable text was found. Scanned PDFs require OCR before AI generation."
-    return extracted, "EXTRACTED", None
+def _content_provenance(item, passages: dict[str, dict]) -> dict:
+    """Structured provenance for a generated flashcard/question (or an imported quiz question)."""
+    passage = passages.get(item.source_passage_id or "", {})
+    return {
+        "document_id": item.source_document_id,
+        "document_version_id": item.source_document_version_id,
+        "source_reference": item.source_reference,
+        "passage_id": item.source_passage_id,
+        "section_path": passage.get("section_path", []),
+        "paragraph": passage.get("paragraph"),
+        "page": passage.get("page"),
+        "slide": passage.get("slide"),
+    }
 
 
 def _save_uploaded_document(file: UploadFile, *, destination: Path) -> tuple[str, str | None]:
@@ -4575,10 +4562,33 @@ def duplicate_question(quiz_id: int, question_id: int, db: Session = Depends(get
         correct_answer=original.correct_answer,
         image_path=original.image_path,
         created_at=datetime.now(timezone.utc),
+        generated_question_id=original.generated_question_id,
+        source_document_id=original.source_document_id,
+        source_document_version_id=original.source_document_version_id,
+        source_reference=original.source_reference,
+        source_passage_id=original.source_passage_id,
     )
     db.add(copy)
     db.commit()
     return RedirectResponse(url=f"/admin/quizzes/{quiz_id}?success=question_duplicated", status_code=303)
+
+
+@app.get("/admin/quizzes/{quiz_id}/questions/{question_id}/provenance")
+def question_provenance(quiz_id: int, question_id: int, db: Session = Depends(get_db)):
+    """Where a quiz question came from: its generated question, document, version and passage."""
+    question = _get_question_or_404(db, quiz_id, question_id)
+    if question.generated_question_id is None and question.source_document_id is None:
+        return JSONResponse({"question_id": question.id, "origin": "manual", "source": None})
+    return JSONResponse({
+        "question_id": question.id,
+        "origin": "generated",
+        "generated_question_id": question.generated_question_id,
+        "source": _content_provenance(question, _version_passages(question.source_document_version)),
+        "document_title": question.source_document.title if question.source_document else None,
+        "document_version_number": (
+            question.source_document_version.version_number if question.source_document_version else None
+        ),
+    })
 
 
 # ----------------------------------------------------------- question: delete --

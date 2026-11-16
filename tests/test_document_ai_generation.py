@@ -198,9 +198,9 @@ class DocumentAIGenerationTests(unittest.TestCase):
             text, status, error = smartquiz_app._extract_document_text(txt_path)
             self.assertEqual(status, "EXTRACTED")
             self.assertIsNone(error)
-            self.assertIn("[[SOURCE: Paragraph 1]]", text)
+            self.assertIn("[[SOURCE: P1 · Paragraph 1]]", text)
             self.assertIn("Cell membranes regulate transport.", text)
-            self.assertIn("[[SOURCE: Paragraph 2]]", text)
+            self.assertIn("[[SOURCE: P2 · Paragraph 2]]", text)
 
             docx_path = root / "notes.docx"
             docx_xml = b"""<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
@@ -211,7 +211,8 @@ class DocumentAIGenerationTests(unittest.TestCase):
                 archive.writestr("word/document.xml", docx_xml)
             text, status, error = smartquiz_app._extract_document_text(docx_path)
             self.assertEqual((status, error), ("EXTRACTED", None))
-            self.assertIn("[[SOURCE: Section: Cell Energy]]", text)
+            self.assertIn("[[SOURCE: P1 · Paragraph 1 · Section: Cell Energy]]", text)
+            self.assertIn("[[SOURCE: P2 · Paragraph 2 · Section: Cell Energy]]", text)
             self.assertIn("Mitochondria release usable energy.", text)
 
             pptx_path = root / "slides.pptx"
@@ -233,7 +234,7 @@ class DocumentAIGenerationTests(unittest.TestCase):
             pdf_path.write_bytes(_make_text_pdf("Cells contain mitochondria."))
             text, status, error = smartquiz_app._extract_document_text(pdf_path)
             self.assertEqual((status, error), ("EXTRACTED", None))
-            self.assertIn("[[SOURCE: Page 1]]", text)
+            self.assertIn("[[SOURCE: PG1 · Page 1]]", text)
             self.assertIn("Cells contain mitochondria.", text)
 
             empty_pdf_path = root / "empty.pdf"
@@ -401,12 +402,14 @@ class DocumentAIGenerationTests(unittest.TestCase):
         self.assertTrue(all(card.approval_status == "PENDING" for card in saved_cards))
         self.assertTrue(all(card.source_document_id == document_id for card in saved_cards))
         self.assertTrue(all(card.source_document_version_id is not None for card in saved_cards))
-        self.assertTrue(all(card.source_reference == "Paragraph 1" for card in saved_cards))
+        self.assertTrue(all(card.source_reference == "P1 · Paragraph 1" for card in saved_cards))
+        self.assertTrue(all(card.source_passage_id == "P1" for card in saved_cards))
         self.assertTrue(all(card.ai_provider == "gemini" and card.ai_model == "test-model" for card in saved_cards))
         self.assertTrue(all(question.approval_status == "PENDING" for question in saved_questions))
         self.assertTrue(all(question.source_document_id == document_id for question in saved_questions))
         self.assertTrue(all(question.source_document_version_id is not None for question in saved_questions))
-        self.assertTrue(all(question.source_reference == "Paragraph 1" for question in saved_questions))
+        self.assertTrue(all(question.source_reference == "P1 · Paragraph 1" for question in saved_questions))
+        self.assertTrue(all(question.source_passage_id == "P1" for question in saved_questions))
         self.assertTrue(all(question.ai_provider == "gemini" and question.ai_model == "test-model" for question in saved_questions))
         db.close()
 

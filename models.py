@@ -144,7 +144,21 @@ class Question(Base):
     # required-vs-optional concepts from the correct_answer text itself.
     grading_notes = Column(Text, nullable=True)
 
+    # Provenance (Phase 3A). Set only when a teacher imports an approved
+    # AI-generated question; NULL for hand-written questions and for every
+    # question created before this existed. Only identifiers and the citation
+    # label are stored here - the question text and answers are not copied
+    # a second time.
+    generated_question_id = Column(Integer, ForeignKey("generated_questions.id"), nullable=True, index=True)
+    source_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True, index=True)
+    source_document_version_id = Column(Integer, ForeignKey("document_versions.id"), nullable=True, index=True)
+    source_reference = Column(String(255), nullable=True)
+    source_passage_id = Column(String(40), nullable=True)
+
     quiz = relationship("Quiz", back_populates="questions")
+    generated_question = relationship("GeneratedQuestion")
+    source_document = relationship("Document")
+    source_document_version = relationship("DocumentVersion")
 
 
 class StudentAccount(Base):
@@ -385,6 +399,10 @@ class DocumentVersion(Base):
     extraction_status = Column(String(30), default="PENDING", nullable=False)
     extraction_error = Column(Text, nullable=True)
     extracted_text = Column(Text, nullable=True)
+    # JSON list of passage locations (id, label, section_path, paragraph,
+    # page, slide, ...) produced by document_extraction. NULL for versions
+    # extracted before Phase 3A, which only have [[SOURCE: ...]] labels.
+    source_passages = Column(Text, nullable=True)
     is_current = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -447,6 +465,7 @@ class Flashcard(Base):
     topic = Column(String(150), default="", nullable=False)
     difficulty = Column(String(20), default="medium", nullable=False)
     source_reference = Column(String(255), default="", nullable=False)
+    source_passage_id = Column(String(40), nullable=True)  # e.g. "P12"; NULL before Phase 3A
     approval_status = Column(String(20), default="DRAFT", nullable=False)
     generated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     ai_provider = Column(String(30), nullable=True)
@@ -475,6 +494,7 @@ class GeneratedQuestion(Base):
     difficulty = Column(String(20), default="medium", nullable=False)
     topic = Column(String(150), default="", nullable=False)
     source_reference = Column(String(255), default="", nullable=False)
+    source_passage_id = Column(String(40), nullable=True)  # e.g. "P12"; NULL before Phase 3A
     approval_status = Column(String(20), default="DRAFT", nullable=False)
     generated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     ai_provider = Column(String(30), nullable=True)

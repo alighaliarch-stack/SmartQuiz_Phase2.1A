@@ -94,6 +94,11 @@
                 {% endif %}
                 <span class="fw-semibold">{{ q.question_text[:70] }}{{ "…" if q.question_text|length > 70 else "" }}</span>
               </div>
+              {% if q.source_document_id %}
+              <div class="sq-note small" data-provenance="{{ q.generated_question_id }}">
+                Generated from <a href="/admin/learning/documents/{{ q.source_document_id }}">{{ q.source_document.title if q.source_document else "document #" ~ q.source_document_id }}</a>{% if q.source_document_version %} v{{ q.source_document_version.version_number }}{% endif %}{% if q.source_reference %} · {{ q.source_reference }}{% endif %}
+              </div>
+              {% endif %}
             </td>
             <td><span class="sq-note">{{ question_type_labels.get(q.question_type, q.question_type) }}</span></td>
             <td>{{ q.points }}</td>

@@ -226,6 +226,30 @@ def _run_migrations() -> None:
             question_cols = _existing_columns(conn, "questions")
             if "grading_notes" not in question_cols:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN grading_notes TEXT"))
+            # Phase 3A provenance: nullable, additive, never backfilled by
+            # guesswork - questions created before this stay NULL.
+            if "generated_question_id" not in question_cols:
+                conn.execute(text(
+                    "ALTER TABLE questions ADD COLUMN generated_question_id INTEGER "
+                    "REFERENCES generated_questions(id)"
+                ))
+            if "source_document_id" not in question_cols:
+                conn.execute(text(
+                    "ALTER TABLE questions ADD COLUMN source_document_id INTEGER REFERENCES documents(id)"
+                ))
+            if "source_document_version_id" not in question_cols:
+                conn.execute(text(
+                    "ALTER TABLE questions ADD COLUMN source_document_version_id INTEGER "
+                    "REFERENCES document_versions(id)"
+                ))
+            if "source_reference" not in question_cols:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN source_reference VARCHAR(255)"))
+            if "source_passage_id" not in question_cols:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN source_passage_id VARCHAR(40)"))
+            for column in ("generated_question_id", "source_document_id", "source_document_version_id"):
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS ix_questions_{column} ON questions({column})"
+                ))
             if "duration_seconds" not in question_cols:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN duration_seconds INTEGER DEFAULT 600"))
                 # Backfill from each question's OWN quiz.duration_minutes
@@ -295,6 +319,15 @@ def _run_migrations() -> None:
                     "ALTER TABLE learning_modules ADD COLUMN status "
                     "VARCHAR(20) NOT NULL DEFAULT 'DRAFT'"
                 ))
+
+        # Phase 3A source provenance. Existing versions/cards/questions keep
+        # NULL here and continue to use their original source_reference label.
+        if "document_versions" in tables:
+            if "source_passages" not in _existing_columns(conn, "document_versions"):
+                conn.execute(text("ALTER TABLE document_versions ADD COLUMN source_passages TEXT"))
+        for generated_table in ("flashcards", "generated_questions"):
+            if generated_table in tables and "source_passage_id" not in _existing_columns(conn, generated_table):
+                conn.execute(text(f"ALTER TABLE {generated_table} ADD COLUMN source_passage_id VARCHAR(40)"))
 
         if "sessions" in tables:
             session_cols = _existing_columns(conn, "sessions")
