@@ -269,6 +269,23 @@ def _run_migrations() -> None:
                     "REFERENCES student_accounts(id)"
                 ))
 
+        if "student_accounts" in tables:
+            account_cols = _existing_columns(conn, "student_accounts")
+            if "session_version" not in account_cols:
+                conn.execute(text(
+                    "ALTER TABLE student_accounts ADD COLUMN session_version "
+                    "INTEGER NOT NULL DEFAULT 0"
+                ))
+            if "failed_login_attempts" not in account_cols:
+                conn.execute(text(
+                    "ALTER TABLE student_accounts ADD COLUMN failed_login_attempts "
+                    "INTEGER NOT NULL DEFAULT 0"
+                ))
+            if "locked_until" not in account_cols:
+                conn.execute(text(
+                    "ALTER TABLE student_accounts ADD COLUMN locked_until DATETIME"
+                ))
+
         if "learning_modules" in tables:
             module_cols = _existing_columns(conn, "learning_modules")
             if "status" not in module_cols:

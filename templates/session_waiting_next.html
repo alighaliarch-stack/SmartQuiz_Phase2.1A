@@ -21,18 +21,19 @@
   (function () {
     var sessionCode = {{ session_code|tojson }};
     var studentId = {{ student.id|tojson if student else 'null' }};
+    var participantToken = {{ student.result_token|tojson if student else '""' }};
     var lastQuestion = {{ last_question|tojson }};
 
     function poll() {
-      fetch('/session/' + sessionCode + '/status?student_id=' + studentId)
+      fetch('/session/' + sessionCode + '/status?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken))
         .then(function (res) { return res.json(); })
         .then(function (data) {
           if (data.session_status === 'SESSION_ENDED') {
             window.location.href = '/student/session/' + sessionCode + '/ended';
           } else if (data.student_completed) {
-            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId;
+            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken);
           } else if (data.session_status === 'IN_PROGRESS' && data.student_current_question > lastQuestion) {
-            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId;
+            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken);
           }
         })
         .catch(function () { /* transient network hiccup — keep polling */ });

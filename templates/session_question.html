@@ -34,6 +34,7 @@
 
           <form id="answer-form" data-action="/student/session/{{ session_code }}/question/{{ question_number }}">
             <input type="hidden" name="student_id" value="{{ student.id }}">
+            <input type="hidden" name="token" value="{{ participant_token }}">
             <input type="hidden" name="question_id" value="{{ question.id }}">
             <input type="hidden" name="question_displayed_at" value="{{ question_displayed_at }}">
 
@@ -137,7 +138,7 @@
               // computed from their own responses, not the session's
               // shared question index, and can be true even while the
               // teacher's session stays Live.
-              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/completed?student_id=' + {{ student.id|tojson }};
+              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/completed?student_id=' + {{ student.id|tojson }} + '&token=' + encodeURIComponent({{ participant_token|tojson }});
               return;
             }
             if (data.next_question_number) {
@@ -146,7 +147,7 @@
               // the instructor" and relying on the next poll to notice.
               // Never fires when Auto Advance is off (the field is only
               // ever set in that mode) or for a duplicate/late submit.
-              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/question/' + data.next_question_number + '?student_id=' + {{ student.id|tojson }};
+              window.location.href = '/student/session/' + {{ session_code|tojson }} + '/question/' + data.next_question_number + '?student_id=' + {{ student.id|tojson }} + '&token=' + encodeURIComponent({{ participant_token|tojson }});
               return;
             }
             if (isTimeout) {
@@ -226,10 +227,11 @@
   (function () {
     var sessionCode = {{ session_code|tojson }};
     var studentId = {{ student.id|tojson }};
+    var participantToken = {{ participant_token|tojson }};
     var myQuestionNumber = {{ question_number|tojson }};
 
     function poll() {
-      fetch('/session/' + sessionCode + '/status?student_id=' + studentId)
+      fetch('/session/' + sessionCode + '/status?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken))
         .then(function (res) { return res.json(); })
         .then(function (data) {
           if (data.session_status === 'SESSION_ENDED') {
@@ -237,9 +239,9 @@
           } else if (data.student_completed) {
             // This student personally finished — checked independently of
             // where the session's shared question index is.
-            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId;
+            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken);
           } else if (data.session_status === 'IN_PROGRESS' && data.student_current_question > myQuestionNumber) {
-            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId;
+            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken);
           }
           // else: still on the same question, or session is QUIZ_COMPLETED
           // and this student hasn't answered yet — stay right here, they

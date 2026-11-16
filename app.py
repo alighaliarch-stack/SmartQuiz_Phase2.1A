@@ -30,6 +30,7 @@ import wave
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -328,6 +329,32 @@ _session_secret = os.environ.get("SESSION_SECRET_KEY") or secrets.token_hex(32)
 app.add_middleware(SessionMiddleware, secret_key=_session_secret, same_site="lax")
 
 
+@app.middleware("http")
+async def _csrf_origin_gate(request: Request, call_next):
+    """Reject browser state changes initiated outside this exact origin.
+
+    Modern browsers send Origin on form submissions and fetch/XHR. Referer
+    is accepted only when Origin is absent; Sec-Fetch-Site provides an
+    additional cross-site rejection signal where supported.
+    """
+    if request.method not in {"GET", "HEAD", "OPTIONS", "TRACE"}:
+        if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+            return JSONResponse({"detail": "CSRF validation failed."}, status_code=403)
+        source = request.headers.get("origin") or request.headers.get("referer")
+        if not source:
+            return JSONResponse({"detail": "CSRF validation failed."}, status_code=403)
+        source_parts = urlsplit(source)
+        target_parts = urlsplit(str(request.url))
+        if (
+            source_parts.scheme.lower() != target_parts.scheme.lower()
+            or source_parts.netloc.lower() != target_parts.netloc.lower()
+            or source_parts.username is not None
+            or source_parts.password is not None
+        ):
+            return JSONResponse({"detail": "CSRF validation failed."}, status_code=403)
+    return await call_next(request)
+
+
 def _get_authenticated_student_account(
     request: Request,
     db: Session,
@@ -345,9 +372,36 @@ def _get_authenticated_student_account(
     if account is None:
         auth.log_out_student(request)
         raise HTTPException(status_code=401, detail="Student account is inactive or unavailable.")
+    if auth.student_session_version_from_session(request) != account.session_version:
+        auth.log_out_student(request)
+        raise HTTPException(status_code=401, detail="Student session is no longer valid. Please log in again.")
     if account.must_change_password and not allow_password_change:
         raise HTTPException(status_code=403, detail="Change your temporary password before continuing.")
     return account
+
+
+def _get_quiz_participant(
+    db: Session,
+    student_id: int,
+    participant_token: str,
+    request: Request,
+) -> Student:
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if (
+        student is None
+        or not student.result_token
+        or not participant_token
+        or not hmac.compare_digest(participant_token, student.result_token)
+    ):
+        raise HTTPException(status_code=404, detail="Quiz participant not found.")
+    if student.account_id is not None:
+        try:
+            account = _get_authenticated_student_account(request, db)
+        except HTTPException as exc:
+            raise HTTPException(status_code=404, detail="Quiz participant not found.") from exc
+        if account.id != student.account_id:
+            raise HTTPException(status_code=404, detail="Quiz participant not found.")
+    return student
 
 
 def _module_access_allowed(db: Session, account_id: int, module: LearningModule) -> bool:
@@ -458,23 +512,46 @@ def student_login_submit(
 ):
     clean_username = (username or "").strip().lower()
     account = db.query(StudentAccount).filter(StudentAccount.username == clean_username).first()
+    now = datetime.now(timezone.utc)
+    locked_until = account.locked_until if account is not None else None
+    if locked_until is not None and locked_until.tzinfo is None:
+        locked_until = locked_until.replace(tzinfo=timezone.utc)
     if (
         account is None
         or not account.is_active
+        or (locked_until is not None and locked_until > now)
         or not auth.verify_password(password, account.password_hash)
     ):
+        if account is not None and account.is_active and (locked_until is None or locked_until <= now):
+            account.failed_login_attempts += 1
+            if account.failed_login_attempts >= auth.STUDENT_LOGIN_FAILURE_LIMIT:
+                account.failed_login_attempts = 0
+                account.locked_until = now + timedelta(
+                    minutes=auth.STUDENT_LOGIN_LOCKOUT_MINUTES
+                )
+            db.commit()
         return RedirectResponse(
             url="/student/login?error=Invalid+username+or+password.",
             status_code=303,
         )
-    auth.log_in_student(request, account.id)
+    account.failed_login_attempts = 0
+    account.locked_until = None
+    db.commit()
+    auth.log_in_student(request, account.id, account.session_version)
     if account.must_change_password:
         return RedirectResponse(url="/student/change-password", status_code=303)
     return RedirectResponse(url="/student/learning", status_code=303)
 
 
 @app.post("/student/logout")
-def student_logout(request: Request):
+def student_logout(request: Request, db: Session = Depends(get_db)):
+    account_id = auth.student_account_id_from_session(request)
+    if account_id is not None:
+        account = db.query(StudentAccount).filter(StudentAccount.id == account_id).first()
+        if account is not None:
+            account.session_version += 1
+            account.updated_at = datetime.now(timezone.utc)
+            db.commit()
     auth.log_out_student(request)
     return RedirectResponse(url="/student/login", status_code=303)
 
@@ -507,8 +584,10 @@ def student_change_password_submit(
         raise HTTPException(status_code=400, detail="Passwords do not match.")
     account.password_hash = auth.hash_password(new_password)
     account.must_change_password = False
+    account.session_version += 1
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
+    auth.log_in_student(request, account.id, account.session_version)
     return RedirectResponse(url="/student/learning", status_code=303)
 
 
@@ -667,6 +746,8 @@ def admin_set_student_account_status(
     if account is None:
         raise HTTPException(status_code=404, detail="Student account not found.")
     account.is_active = active
+    if not active:
+        account.session_version += 1
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
     return JSONResponse({"status": "updated", "account_id": account.id, "is_active": account.is_active})
@@ -680,6 +761,7 @@ def admin_reset_student_password(account_id: int, db: Session = Depends(get_db))
     temporary_password = secrets.token_urlsafe(12)
     account.password_hash = auth.hash_password(temporary_password)
     account.must_change_password = True
+    account.session_version += 1
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
     return JSONResponse({"status": "reset", "account_id": account.id, "temporary_password": temporary_password})
@@ -2272,7 +2354,13 @@ def login_submit(
     db: Session = Depends(get_db),
 ):
     stored_hash = auth.get_password_hash(db)
-    if stored_hash and auth.verify_password(password, stored_hash):
+    now = datetime.now(timezone.utc)
+    if (
+        stored_hash
+        and not auth.teacher_login_is_locked(db, now)
+        and auth.verify_password(password, stored_hash)
+    ):
+        auth.reset_teacher_login_failures(db)
         auth.log_in_teacher(request)
         # Only ever redirect within this app — an unvalidated `next` value
         # could otherwise be used to bounce a login through an external
@@ -2281,6 +2369,7 @@ def login_submit(
         # back to the dashboard.
         safe_next = next if next.startswith("/") and not next.startswith("//") else "/admin"
         return RedirectResponse(url=safe_next, status_code=303)
+    auth.record_teacher_login_failure(db, now)
     return RedirectResponse(
         url=f"/login?next={next}&error=Incorrect+password.", status_code=303
     )
@@ -2396,19 +2485,29 @@ def join_submit(
     db.add(student)
     db.commit()
     db.refresh(student)
-    return RedirectResponse(url=f"/student/waiting/{student.id}", status_code=303)
+    return RedirectResponse(
+        url=f"/student/waiting/{student.id}?token={student.result_token}",
+        status_code=303,
+    )
 
 
 @app.get("/student/waiting/{student_id}")
-def waiting_room(student_id: int, request: Request, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
+def waiting_room(
+    student_id: int,
+    request: Request,
+    token: str = "",
+    db: Session = Depends(get_db),
+):
+    student = _get_quiz_participant(db, student_id, token, request)
     quiz = student.quiz
 
     if student.session and _student_completed_quiz(db, student.id, quiz.id):
         return RedirectResponse(
-            url=f"/student/session/{student.session.session_code}/completed", status_code=303
+            url=(
+                f"/student/session/{student.session.session_code}/completed"
+                f"?student_id={student.id}&token={student.result_token}"
+            ),
+            status_code=303,
         )
 
     if student.session_id:
@@ -2433,12 +2532,19 @@ def waiting_room(student_id: int, request: Request, db: Session = Depends(get_db
             "quiz": quiz,
             "connected_count": connected_count,
             "session_code": student.session.session_code if student.session else None,
+            "participant_token": student.result_token,
         },
     )
 
 
 @app.get("/session/{session_code}/status")
-def session_status(session_code: str, student_id: int | None = None, db: Session = Depends(get_db)):
+def session_status(
+    session_code: str,
+    request: Request,
+    student_id: int | None = None,
+    token: str = "",
+    db: Session = Depends(get_db),
+):
     """Polled every 2s by every student-facing page during a live
     session (waiting room, question player, post-answer waiting page).
     Plain JSON, no HTML.
@@ -2478,14 +2584,18 @@ def session_status(session_code: str, student_id: int | None = None, db: Session
             "total_questions": 0, "student_completed": False,
         }
 
+    student = (
+        _get_quiz_participant(db, student_id, token, request)
+        if student_id is not None else None
+    )
+    if student is not None and student.quiz_id != session.quiz_id:
+        raise HTTPException(status_code=404, detail="Quiz participant not found.")
     total_questions = len(session.quiz.questions)
     phase = _session_phase(session.quiz, session)
     session_status_value = "IN_PROGRESS" if phase.startswith("QUESTION_") else phase
     ended = session_status_value == "SESSION_ENDED"
     quiz_started = session_status_value == "IN_PROGRESS"
-    student_completed = (
-        _student_completed_quiz(db, student_id, session.quiz_id) if student_id else False
-    )
+    student_completed = _student_completed_quiz(db, student.id, session.quiz_id) if student else False
     # This student's OWN effective question number — identical to
     # current_question_index when auto_advance is off (or no student_id
     # was given), but can be FURTHER ALONG than the global index when
@@ -2494,15 +2604,10 @@ def session_status(session_code: str, student_id: int | None = None, db: Session
     # navigate on; current_question_index is kept as-is for any older
     # caller that still reads it directly.
     student_current_question = session.current_question_index
-    student = None
-    if student_id:
-        student = db.query(Student).filter(Student.id == student_id).first()
-        if student and student.quiz_id == session.quiz_id:
-            if _ensure_student_question_state(session, student):
-                db.commit()
-            student_current_question = _student_effective_question_index(session.quiz, session, student)
-        else:
-            student = None
+    if student is not None:
+        if _ensure_student_question_state(session, student):
+            db.commit()
+        student_current_question = _student_effective_question_index(session.quiz, session, student)
     if session_status_value.startswith("QUESTION_") or session_status_value == "IN_PROGRESS":
         _log_timer_state(f"STATUS (student_id={student_id})", session)
     return {
@@ -2570,6 +2675,7 @@ def session_question_page(
     question_number: int,
     request: Request,
     student_id: int | None = None,
+    token: str = "",
     db: Session = Depends(get_db),
 ):
     """The real quiz player for question number `question_number` (1-indexed).
@@ -2586,7 +2692,10 @@ def session_question_page(
     if not session:
         return RedirectResponse(url=f"/student/session/{session_code}/ended", status_code=303)
 
-    student = db.query(Student).filter(Student.id == student_id).first() if student_id else None
+    student = (
+        _get_quiz_participant(db, student_id, token, request)
+        if student_id is not None else None
+    )
     if not student or student.quiz_id != session.quiz_id:
         return RedirectResponse(url="/join", status_code=303)
 
@@ -2639,6 +2748,7 @@ def session_question_page(
             "total_questions": total_questions,
             "options": options,
             "student": student,
+            "participant_token": student.result_token,
             "session_code": session_code.upper(),
             "question_type_labels": QUESTION_TYPES,
             "already_submitted": existing_response is not None,
@@ -2655,7 +2765,9 @@ def session_question_submit(
     session_code: str,
     question_number: int,
     background_tasks: BackgroundTasks,
+    request: Request,
     student_id: int = Form(...),
+    token: str = Form(...),
     question_id: int = Form(...),
     selected_option: str = Form(""),
     selected_options: list[str] = Form([]),
@@ -2680,10 +2792,16 @@ def session_question_submit(
         .filter(LiveSession.session_code == session_code.upper())
         .first()
     )
-    student = db.query(Student).filter(Student.id == student_id).first()
+    student = _get_quiz_participant(db, student_id, token, request)
     question = db.query(Question).filter(Question.id == question_id).first()
 
     if not session or not student or not question:
+        raise HTTPException(status_code=404, detail="Session, student, or question not found")
+    if (
+        student.quiz_id != session.quiz_id
+        or question.quiz_id != session.quiz_id
+        or (student.session_id is not None and student.session_id != session.id)
+    ):
         raise HTTPException(status_code=404, detail="Session, student, or question not found")
 
     # Defensive: don't assume a prior GET request (the question page, or
@@ -2891,6 +3009,7 @@ def session_waiting_next(
     session_code: str,
     request: Request,
     student_id: int | None = None,
+    token: str = "",
     last_question: int = 0,
     db: Session = Depends(get_db),
 ):
@@ -2899,7 +3018,10 @@ def session_waiting_next(
     waiting room and question player, comparing against `last_question`
     (the question this student just answered) so it only moves forward
     once the teacher actually advances past that question."""
-    student = db.query(Student).filter(Student.id == student_id).first() if student_id else None
+    student = (
+        _get_quiz_participant(db, student_id, token, request)
+        if student_id is not None else None
+    )
     if student and _student_completed_quiz(db, student.id, student.quiz_id):
         return RedirectResponse(url=f"/student/session/{session_code}/completed", status_code=303)
 
@@ -2918,7 +3040,11 @@ def session_waiting_next(
 
 @app.get("/student/session/{session_code}/completed")
 def session_completed_page(
-    session_code: str, request: Request, student_id: int | None = None, db: Session = Depends(get_db)
+    session_code: str,
+    request: Request,
+    student_id: int | None = None,
+    token: str = "",
+    db: Session = Depends(get_db),
 ):
     """Reached once the teacher clicks "Finish Quiz" and every question
     is done — distinct from Session Ended, which covers an early/manual
@@ -2928,7 +3054,12 @@ def session_completed_page(
         .filter(LiveSession.session_code == session_code.upper())
         .first()
     )
-    student = db.query(Student).filter(Student.id == student_id).first() if student_id else None
+    student = (
+        _get_quiz_participant(db, student_id, token, request)
+        if student_id is not None else None
+    )
+    if student is not None and session is not None and student.quiz_id != session.quiz_id:
+        raise HTTPException(status_code=404, detail="Quiz participant not found.")
     return templates.TemplateResponse(
         request=request,
         name="session_completed.html",
@@ -2968,13 +3099,10 @@ def student_results_page(
     exits early on the first mismatched character, which is a real
     timing side-channel for security tokens.
     """
-    student = db.query(Student).filter(Student.id == student_id).first()
-    token_ok = bool(
-        student and student.result_token and token
-        and hmac.compare_digest(token, student.result_token)
-    )
-    if not token_ok:
-        raise HTTPException(status_code=404, detail="Results not found.")
+    try:
+        student = _get_quiz_participant(db, student_id, token, request)
+    except HTTPException as exc:
+        raise HTTPException(status_code=404, detail="Results not found.") from exc
 
     data = _student_own_results(db, student)
     return templates.TemplateResponse(
@@ -3090,6 +3218,7 @@ def change_password_submit(
             url="/admin/settings?error=New+password+and+confirmation+do+not+match.", status_code=303
         )
     auth.set_password_hash(db, auth.hash_password(new_password))
+    auth.log_in_teacher(request)
     return RedirectResponse(url="/admin/settings?success=password_updated", status_code=303)
 
 
@@ -3858,11 +3987,10 @@ def student_results_page(
     case it was, so this can't be used to probe for valid student IDs.
     Token comparison is constant-time (hmac.compare_digest) so response
     timing can't leak how much of the token matched."""
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student or not student.result_token or not token:
-        raise HTTPException(status_code=404, detail="Results not found")
-    if not hmac.compare_digest(token, student.result_token):
-        raise HTTPException(status_code=404, detail="Results not found")
+    try:
+        student = _get_quiz_participant(db, student_id, token, request)
+    except HTTPException as exc:
+        raise HTTPException(status_code=404, detail="Results not found") from exc
 
     data = _student_own_results(db, student)
     return templates.TemplateResponse(

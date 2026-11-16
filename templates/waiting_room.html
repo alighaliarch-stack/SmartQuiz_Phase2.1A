@@ -50,9 +50,10 @@
   (function () {
     var sessionCode = {{ session_code|tojson }};
     var studentId = {{ student.id|tojson }};
+    var participantToken = {{ participant_token|tojson }};
 
     function poll() {
-      fetch('/session/' + sessionCode + '/status?student_id=' + studentId)
+      fetch('/session/' + sessionCode + '/status?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken))
         .then(function (res) { return res.json(); })
         .then(function (data) {
           // session_status is the single authoritative field — branch on
@@ -65,9 +66,9 @@
             // Per-student fact, independent of session_status — a
             // student can be done even while the session is still
             // IN_PROGRESS (finished early) or QUIZ_COMPLETED.
-            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId;
+            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken);
           } else if (data.session_status === 'IN_PROGRESS') {
-            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId;
+            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId + '&token=' + encodeURIComponent(participantToken);
           }
           // else: WAITING (quiz not started), or QUIZ_COMPLETED but this
           // student never started and so can't be "completed" either —

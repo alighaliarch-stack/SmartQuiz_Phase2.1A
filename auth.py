@@ -31,6 +31,7 @@ import hashlib
 import hmac
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Request
 from sqlalchemy.orm import Session
@@ -42,6 +43,18 @@ PBKDF2_ITERATIONS = 260_000
 PASSWORD_HASH_KEY = "teacher_password_hash"
 SESSION_KEY = "teacher_authenticated"
 STUDENT_ACCOUNT_SESSION_KEY = "student_account_id"
+STUDENT_SESSION_VERSION_KEY = "student_session_version"
+# Five consecutive failures lock the identity for 15 minutes. Student
+# lockout state is persisted on StudentAccount; teacher lockout is stored
+# in AppSetting so both policies survive process restarts.
+STUDENT_LOGIN_FAILURE_LIMIT = 5
+STUDENT_LOGIN_LOCKOUT_MINUTES = 15
+# Failed teacher logins are stored in AppSetting so the lockout persists
+# across process restarts instead of depending on per-worker memory.
+TEACHER_LOGIN_FAILURE_LIMIT = 5
+TEACHER_LOGIN_LOCKOUT_MINUTES = 15
+TEACHER_LOGIN_FAILURES_KEY = "teacher_login_failed_attempts"
+TEACHER_LOGIN_LOCKED_UNTIL_KEY = "teacher_login_locked_until"
 
 
 def hash_password(password: str) -> str:
@@ -84,6 +97,62 @@ def set_password_hash(db: Session, password_hash: str) -> None:
         row.value = password_hash
     else:
         db.add(AppSetting(key=PASSWORD_HASH_KEY, value=password_hash))
+    for key, value in (
+        (TEACHER_LOGIN_FAILURES_KEY, "0"),
+        (TEACHER_LOGIN_LOCKED_UNTIL_KEY, ""),
+    ):
+        row = db.query(AppSetting).filter(AppSetting.key == key).first()
+        if row:
+            row.value = value
+        else:
+            db.add(AppSetting(key=key, value=value))
+    db.commit()
+
+
+def teacher_login_is_locked(db: Session, now: datetime | None = None) -> bool:
+    row = db.query(AppSetting).filter(AppSetting.key == TEACHER_LOGIN_LOCKED_UNTIL_KEY).first()
+    if row is None or not row.value:
+        return False
+    locked_until = datetime.fromisoformat(row.value)
+    if locked_until.tzinfo is None:
+        locked_until = locked_until.replace(tzinfo=timezone.utc)
+    return locked_until > (now or datetime.now(timezone.utc))
+
+
+def record_teacher_login_failure(db: Session, now: datetime | None = None) -> None:
+    now = now or datetime.now(timezone.utc)
+    failures = db.query(AppSetting).filter(AppSetting.key == TEACHER_LOGIN_FAILURES_KEY).first()
+    attempts = int(failures.value) + 1 if failures and failures.value else 1
+    if failures is None:
+        failures = AppSetting(key=TEACHER_LOGIN_FAILURES_KEY, value="0")
+        db.add(failures)
+    if attempts >= TEACHER_LOGIN_FAILURE_LIMIT:
+        failures.value = "0"
+        locked_until = db.query(AppSetting).filter(
+            AppSetting.key == TEACHER_LOGIN_LOCKED_UNTIL_KEY
+        ).first()
+        if locked_until is None:
+            db.add(AppSetting(
+                key=TEACHER_LOGIN_LOCKED_UNTIL_KEY,
+                value=(now + timedelta(minutes=TEACHER_LOGIN_LOCKOUT_MINUTES)).isoformat(),
+            ))
+        else:
+            locked_until.value = (
+                now + timedelta(minutes=TEACHER_LOGIN_LOCKOUT_MINUTES)
+            ).isoformat()
+    else:
+        failures.value = str(attempts)
+    db.commit()
+
+
+def reset_teacher_login_failures(db: Session) -> None:
+    for key, value in (
+        (TEACHER_LOGIN_FAILURES_KEY, "0"),
+        (TEACHER_LOGIN_LOCKED_UNTIL_KEY, ""),
+    ):
+        row = db.query(AppSetting).filter(AppSetting.key == key).first()
+        if row:
+            row.value = value
     db.commit()
 
 
@@ -121,8 +190,8 @@ def is_teacher_authenticated(request: Request) -> bool:
 
 
 def log_in_teacher(request: Request) -> None:
-    request.session.pop(STUDENT_ACCOUNT_SESSION_KEY, None)
-    request.session[SESSION_KEY] = True
+    request.session.clear()
+    request.session[SESSION_KEY] = secrets.token_urlsafe(24)
 
 
 def log_out_teacher(request: Request) -> None:
@@ -134,14 +203,20 @@ def student_account_id_from_session(request: Request) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def log_in_student(request: Request, account_id: int) -> None:
-    request.session.pop(SESSION_KEY, None)
-    request.session.pop(STUDENT_ACCOUNT_SESSION_KEY, None)
+def student_session_version_from_session(request: Request) -> int | None:
+    value = request.session.get(STUDENT_SESSION_VERSION_KEY)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def log_in_student(request: Request, account_id: int, session_version: int) -> None:
+    request.session.clear()
     request.session[STUDENT_ACCOUNT_SESSION_KEY] = account_id
+    request.session[STUDENT_SESSION_VERSION_KEY] = session_version
 
 
 def log_out_student(request: Request) -> None:
     request.session.pop(STUDENT_ACCOUNT_SESSION_KEY, None)
+    request.session.pop(STUDENT_SESSION_VERSION_KEY, None)
 
 
 class TeacherAuthRequired(Exception):
