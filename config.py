@@ -7,6 +7,7 @@ this milestone is FastAPI + Jinja2 + SQLite + SQLAlchemy + Uvicorn only.
 """
 
 from pathlib import Path
+import os
 
 
 class Settings:
@@ -17,6 +18,7 @@ class Settings:
 
     DATABASE_FILE: Path = BASE_DIR / "smartquiz-development.db"
     DATABASE_URL: str = f"sqlite:///{DATABASE_FILE}"
+    PUBLIC_BASE_URL: str = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 
 settings = Settings()

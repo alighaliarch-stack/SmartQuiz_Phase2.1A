@@ -8,7 +8,15 @@
       <p class="text-uppercase small mb-1">Teacher management</p>
       <h1 class="h2 mb-0">Student Accounts</h1>
     </div>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sq btn-sq-outline" href="{{ student_portal_url }}">Student Portal</a>
+      <button class="btn btn-sq btn-sq-outline" type="button" data-copy-portal data-portal-url="{{ student_portal_url }}">Copy Student Login Link</button>
+    </div>
   </div>
+  <p class="small text-secondary" aria-live="polite">
+    Share the portal link privately. Localhost is limited to this computer; configure <code>PUBLIC_BASE_URL</code> for LAN/deployed access.
+    <span data-copy-status></span>
+  </p>
 
   <section class="sq-card p-4 mb-4">
     <h2 class="h5">Create account</h2>
@@ -128,6 +136,29 @@
     }
     courseSelect.addEventListener("change", filterModules);
     filterModules();
+  });
+  document.querySelectorAll("[data-copy-portal]").forEach(function (button) {
+    button.addEventListener("click", async function () {
+      var value = button.dataset.portalUrl;
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch (error) {
+        var input = document.createElement("textarea");
+        input.value = value;
+        input.setAttribute("readonly", "");
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        var copied = document.execCommand("copy");
+        input.remove();
+        if (!copied) {
+          document.querySelector("[data-copy-status]").textContent = "Copy failed. Select and copy the portal address manually.";
+          return;
+        }
+      }
+      document.querySelector("[data-copy-status]").textContent = "Student login link copied.";
+    });
   });
 </script>
 {% endblock %}

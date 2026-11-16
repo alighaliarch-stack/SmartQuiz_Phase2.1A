@@ -18,10 +18,18 @@
       <h1 class="h3 mb-1">Welcome back 👋</h1>
       <p class="sq-note mb-0">Here's what's happening with your quizzes.</p>
     </div>
-    <a href="/admin/quizzes/new" class="btn btn-sq btn-sq-primary btn-sq-lg">
-      <i class="bi bi-plus-lg me-2"></i>Create Quiz
-    </a>
+    <div class="d-flex flex-wrap gap-2">
+      <a href="{{ student_portal_url }}" class="btn btn-sq btn-sq-outline">Student Portal</a>
+      <button type="button" class="btn btn-sq btn-sq-outline" data-copy-portal data-portal-url="{{ student_portal_url }}">Copy Student Login Link</button>
+      <a href="/admin/quizzes/new" class="btn btn-sq btn-sq-primary btn-sq-lg">
+        <i class="bi bi-plus-lg me-2"></i>Create Quiz
+      </a>
+    </div>
   </div>
+  <p class="sq-note mb-4" aria-live="polite">
+    Share the portal link privately. Configure <code>PUBLIC_BASE_URL</code> for LAN or deployed access.
+    <span data-copy-status></span>
+  </p>
 
   <!-- ============================= STAT CARDS ============================= -->
   <div class="row g-3 mb-4">
@@ -114,5 +122,32 @@
     </div>
     {% endif %}
   </div>
-
 {% endblock %}
+
+  {% block extra_script %}
+  <script>
+    document.querySelectorAll("[data-copy-portal]").forEach(function (button) {
+      button.addEventListener("click", async function () {
+        var value = button.dataset.portalUrl;
+        try {
+          await navigator.clipboard.writeText(value);
+        } catch (error) {
+          var input = document.createElement("textarea");
+          input.value = value;
+          input.setAttribute("readonly", "");
+          input.style.position = "fixed";
+          input.style.opacity = "0";
+          document.body.appendChild(input);
+          input.select();
+          var copied = document.execCommand("copy");
+          input.remove();
+          if (!copied) {
+            document.querySelector("[data-copy-status]").textContent = "Copy failed. Select and copy the portal address manually.";
+            return;
+          }
+        }
+        document.querySelector("[data-copy-status]").textContent = "Student login link copied.";
+      });
+    });
+  </script>
+  {% endblock %}

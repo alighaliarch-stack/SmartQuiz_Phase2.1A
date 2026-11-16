@@ -45,7 +45,7 @@ def main() -> int:
     key_configured = bool(api_key and api_key.strip())
     print(f"GEMINI_API_KEY: {'configured' if key_configured else 'NOT configured'}")
 
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
     provider = os.environ.get("AI_GRADING_PROVIDER", "gemini")
 
     client_ok = False

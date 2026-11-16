@@ -9,10 +9,16 @@
       <h1 class="h2 mb-0">Learning dashboard</h1>
     </div>
     <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sq btn-sq-outline" href="{{ student_portal_url }}">Student Portal</a>
+      <button class="btn btn-sq btn-sq-outline" type="button" data-copy-portal data-portal-url="{{ student_portal_url }}">Copy Student Login Link</button>
       <a class="btn btn-sq btn-sq-outline" href="/admin/student-accounts">Manage students</a>
       <a class="btn btn-sq btn-sq-primary" href="/admin/quizzes/new">Open quiz builder</a>
     </div>
   </div>
+  <p class="small text-secondary mb-4" aria-live="polite">
+    Share the portal link only with students. Configure <code>PUBLIC_BASE_URL</code> for a LAN or deployed address.
+    <span data-copy-status></span>
+  </p>
 
   <section class="sq-card p-4 mb-4">
     <h2 class="h4">Create a course</h2>
@@ -81,7 +87,26 @@
         <div class="col-lg-4">
           <h5 class="h6">Documents ({{ row.documents|length }})</h5>
           {% for document in row.documents %}
-          <div class="small border-top py-2"><strong>{{ document.title }}</strong><br><span class="text-secondary">{{ document.extraction_status }} · {{ document.file_size_bytes }} bytes</span></div>
+          <div class="small border-top py-2">
+            <strong>{{ document.title }}</strong>
+            <span class="badge text-bg-secondary">{{ document.extraction_status }}</span>
+            <div class="text-secondary">{{ document.file_size_bytes }} bytes · {{ document.extracted_text|length }} extracted characters</div>
+            <a href="/admin/learning/documents/{{ document.id }}">Inspect source</a>
+            {% if document.extraction_status == "EXTRACTED" and document.extracted_text %}
+            <form method="post" action="/admin/learning/modules/{{ module.id }}/generate/flashcards" class="row g-2 mt-1">
+              <input type="hidden" name="document_id" value="{{ document.id }}">
+              <div class="col-4"><label class="visually-hidden" for="flashcard-count-{{ document.id }}">Flashcard count</label><input id="flashcard-count-{{ document.id }}" class="form-control form-control-sm" type="number" name="count" min="1" max="30" value="8" required></div>
+              <div class="col-8"><button class="btn btn-sm btn-sq btn-sq-outline w-100" type="submit">Generate AI flashcards</button></div>
+            </form>
+            <form method="post" action="/admin/learning/modules/{{ module.id }}/generate/questions" class="row g-2 mt-1">
+              <input type="hidden" name="document_id" value="{{ document.id }}">
+              <div class="col-4"><label class="visually-hidden" for="question-count-{{ document.id }}">Question count (3–30)</label><input id="question-count-{{ document.id }}" class="form-control form-control-sm" type="number" name="count" min="3" max="30" value="6" required></div>
+              <div class="col-8"><button class="btn btn-sm btn-sq btn-sq-outline w-100" type="submit">Generate AI quiz questions</button></div>
+            </form>
+            {% else %}
+            <p class="small text-warning mt-1 mb-0">{{ document.extraction_error or "No text was extracted; AI generation is unavailable." }}</p>
+            {% endif %}
+          </div>
           {% else %}<p class="small text-secondary">No documents uploaded.</p>{% endfor %}
           <form method="post" action="/admin/learning/modules/{{ module.id }}/documents/upload" enctype="multipart/form-data" class="mt-2">
             <label class="form-label small" for="document-{{ module.id }}">Add teaching material</label>
@@ -94,12 +119,23 @@
           <h5 class="h6">Flashcards ({{ row.flashcards|length }})</h5>
           {% for card in row.flashcards %}
           <div class="small border-top py-2">
-            <strong>{{ card.front }}</strong><br><span class="text-secondary">{{ card.approval_status }} · {{ card.topic }}</span>
-            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/status" class="mt-1 d-flex gap-2">
-              <select class="form-select form-select-sm" name="status" aria-label="Flashcard approval status">
-                {% for status in ["DRAFT", "APPROVED", "REJECTED"] %}<option value="{{ status }}" {% if card.approval_status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}
-              </select><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save</button>
+            <span class="badge {% if card.approval_status == 'APPROVED' %}text-bg-success{% elif card.approval_status == 'REJECTED' %}text-bg-danger{% else %}text-bg-warning{% endif %}">{{ "Pending review" if card.approval_status in ["PENDING", "DRAFT"] else card.approval_status }}</span>
+            <p class="mt-1 mb-1"><strong>{{ card.front }}</strong><br>{{ card.back }}</p>
+            <p class="text-secondary mb-1">{{ card.explanation }} · {{ card.topic }}</p>
+            {% if card.source_document_id %}<a href="/admin/learning/documents/{{ card.source_document_id }}">Source document #{{ card.source_document_id }}</a>{% else %}<span>No source document</span>{% endif %}
+            <span class="text-secondary">· {{ card.source_reference }} · {{ card.ai_provider or "manual" }} {{ card.ai_model or "" }}</span>
+            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/edit" class="mt-2">
+              <label class="form-label small" for="card-front-{{ card.id }}">Edit prompt</label>
+              <textarea id="card-front-{{ card.id }}" class="form-control form-control-sm mb-1" name="front" rows="2" required>{{ card.front }}</textarea>
+              <label class="form-label small" for="card-back-{{ card.id }}">Edit answer</label>
+              <textarea id="card-back-{{ card.id }}" class="form-control form-control-sm mb-1" name="back" rows="3" required>{{ card.back }}</textarea>
+              <input class="form-control form-control-sm mb-1" name="explanation" value="{{ card.explanation }}" aria-label="Explanation">
+              <input class="form-control form-control-sm mb-1" name="topic" value="{{ card.topic }}" aria-label="Topic">
+              <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save edits</button>
             </form>
+            <div class="d-flex gap-2 mt-2">
+            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/status"><input type="hidden" name="status" value="APPROVED"><button class="btn btn-sm btn-success" type="submit">Approve</button></form>
+            <form method="post" action="/admin/learning/flashcards/{{ card.id }}/status"><input type="hidden" name="status" value="REJECTED"><button class="btn btn-sm btn-outline-danger" type="submit">Reject</button></form>
           </div>
           {% else %}<p class="small text-secondary">No flashcards available.</p>{% endfor %}
         </div>
@@ -107,12 +143,38 @@
           <h5 class="h6">Generated questions ({{ row.questions|length }})</h5>
           {% for question in row.questions %}
           <div class="small border-top py-2">
-            <strong>{{ question.question_text }}</strong><br><span class="text-secondary">{{ question.question_type }} · {{ question.approval_status }}</span>
-            <form method="post" action="/admin/learning/questions/{{ question.id }}/status" class="mt-1 d-flex gap-2">
-              <select class="form-select form-select-sm" name="status" aria-label="Question approval status">
-                {% for status in ["DRAFT", "APPROVED", "REJECTED"] %}<option value="{{ status }}" {% if question.approval_status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}
-              </select><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save</button>
+            <span class="badge {% if question.approval_status == 'APPROVED' %}text-bg-success{% elif question.approval_status == 'REJECTED' %}text-bg-danger{% else %}text-bg-warning{% endif %}">{{ "Pending review" if question.approval_status in ["PENDING", "DRAFT"] else question.approval_status }}</span>
+            <p class="mt-1 mb-1"><strong>{{ question.question_text }}</strong></p>
+            <p class="text-secondary mb-1">Type: {{ question.question_type }} · Answer: {{ question.correct_answer }} · {{ question.explanation }}</p>
+            {% if question.source_document_id %}<a href="/admin/learning/documents/{{ question.source_document_id }}">Source document #{{ question.source_document_id }}</a>{% else %}<span>No source document</span>{% endif %}
+            <span class="text-secondary">· {{ question.source_reference }} · {{ question.ai_provider or "manual" }} {{ question.ai_model or "" }}</span>
+            <form method="post" action="/admin/learning/questions/{{ question.id }}/edit" class="mt-2">
+              <label class="form-label small" for="generated-question-{{ question.id }}">Edit question</label>
+              <textarea id="generated-question-{{ question.id }}" class="form-control form-control-sm mb-1" name="question_text" rows="2" required>{{ question.question_text }}</textarea>
+              <label class="form-label small" for="generated-type-{{ question.id }}">Question type</label>
+              <select id="generated-type-{{ question.id }}" class="form-select form-select-sm mb-1" name="question_type">
+                {% for kind in ["mcq_single", "true_false", "short_answer"] %}<option value="{{ kind }}" {% if question.question_type == kind %}selected{% endif %}>{{ kind }}</option>{% endfor %}
+              </select>
+              <label class="form-label small" for="generated-options-{{ question.id }}">Options (JSON)</label>
+              <textarea id="generated-options-{{ question.id }}" class="form-control form-control-sm mb-1" name="answer_options" rows="2">{{ question.answer_options }}</textarea>
+              <label class="form-label small" for="generated-answer-{{ question.id }}">Correct answer (JSON)</label>
+              <textarea id="generated-answer-{{ question.id }}" class="form-control form-control-sm mb-1" name="correct_answer" rows="2">{{ question.correct_answer }}</textarea>
+              <label class="form-label small" for="generated-explanation-{{ question.id }}">Explanation</label>
+              <textarea id="generated-explanation-{{ question.id }}" class="form-control form-control-sm mb-1" name="explanation" rows="2">{{ question.explanation }}</textarea>
+              <input class="form-control form-control-sm mb-1" name="topic" value="{{ question.topic }}" aria-label="Topic">
+              <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Save edits</button>
             </form>
+            <div class="d-flex flex-wrap gap-2 mt-2">
+              <form method="post" action="/admin/learning/questions/{{ question.id }}/status"><input type="hidden" name="status" value="APPROVED"><button class="btn btn-sm btn-success" type="submit">Approve</button></form>
+              <form method="post" action="/admin/learning/questions/{{ question.id }}/status"><input type="hidden" name="status" value="REJECTED"><button class="btn btn-sm btn-outline-danger" type="submit">Reject</button></form>
+              {% if question.approval_status == "APPROVED" %}
+              <form method="post" action="/admin/learning/questions/{{ question.id }}/add-to-quiz" class="d-flex gap-1">
+                <select class="form-select form-select-sm" name="quiz_id" aria-label="Draft quiz" required>
+                  {% for quiz in draft_quizzes %}<option value="{{ quiz.id }}">{{ quiz.title }}</option>{% endfor %}
+                </select>
+                <button class="btn btn-sm btn-sq btn-sq-outline" type="submit" {% if not draft_quizzes %}disabled{% endif %}>Add to quiz</button>
+            </form>
+            {% endif %}
           </div>
           {% else %}<p class="small text-secondary">No generated questions available.</p>{% endfor %}
         </div>
@@ -146,4 +208,32 @@
   <section class="sq-card p-4"><p class="mb-0">No courses yet. Create a course to start organizing learning materials.</p></section>
   {% endfor %}
 </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  document.querySelectorAll("[data-copy-portal]").forEach(function (button) {
+    button.addEventListener("click", async function () {
+      var value = button.dataset.portalUrl;
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch (error) {
+        var input = document.createElement("textarea");
+        input.value = value;
+        input.setAttribute("readonly", "");
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        var copied = document.execCommand("copy");
+        input.remove();
+        if (!copied) {
+          document.querySelector("[data-copy-status]").textContent = "Copy failed. Select and copy the portal address manually.";
+          return;
+        }
+      }
+      document.querySelector("[data-copy-status]").textContent = "Student login link copied.";
+    });
+  });
+</script>
 {% endblock %}

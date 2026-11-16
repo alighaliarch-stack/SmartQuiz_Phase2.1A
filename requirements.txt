@@ -7,3 +7,4 @@ qrcode[pil]>=7.4.2
 google-genai>=1.0.0
 python-dotenv>=1.0.0
 itsdangerous>=2.1.0
+pypdf>=5.0.0

@@ -15,7 +15,7 @@ Configuration — all via environment variables, never hard-coded:
                             (tests only)
     GEMINI_API_KEY          required for the "gemini" provider
     GEMINI_MODEL            Gemini model name for the "gemini" provider,
-                            e.g. "gemini-2.5-flash" (default) — override
+                            e.g. "gemini-3.5-flash" (default) — override
                             to switch models without touching code
     ANTHROPIC_API_KEY       required for the "anthropic" provider
     AI_GRADING_MODEL        model name for the "anthropic" provider
@@ -160,7 +160,7 @@ def _evaluate_via_gemini(question_text: str, expected_answer: str, accepted_answ
     if not api_key:
         raise AIEvaluationUnavailable("GEMINI_API_KEY is not configured")
 
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
     prompt = _build_prompt(question_text, expected_answer, accepted_answers, student_answer, points, grading_notes)
 
     try:

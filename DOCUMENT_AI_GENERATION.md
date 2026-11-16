@@ -1,0 +1,9 @@
+# Document-based AI generation
+
+Teachers can inspect a document's extracted text and request flashcards (1–30) or quiz questions (3–30) from that specific document. Quiz batches contain multiple-choice, true/false, and short-answer types. Generated content is saved with `PENDING` status, source-document and current-version IDs, a source location, provider/model, and generation timestamp. It is not available to students until a teacher approves it.
+
+The generation request sends the selected document's extracted text to the configured external AI provider. Do not upload material unless its use with that provider is permitted by your institution and document owner. The provider key is read from the server environment and is never included in the page or response. Configure `AI_CONTENT_PROVIDER` and the matching existing provider key (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`); optionally use `AI_CONTENT_MODEL`. Without a provider key, generation returns an explicit service-unavailable error and stores no content. Test providers are not supported for generation.
+
+PDF text extraction uses `pypdf`; image-only/scanned PDFs have no extractable text and require OCR, which is not included. DOCX, PPTX, and TXT extraction captures text only; embedded images and diagrams are not interpreted. PDF pages, presentation slides, and document paragraphs/heading sections are marked for citation. Content with no extractable text cannot be sent to generation.
+
+AI output validation enforces item count, supported question types, answer shape, non-duplicate prompts, and citations that match a source marker in the extracted text. This cannot prove semantic correctness; teachers must inspect, edit, and approve each item before student use. Approved generated quiz questions remain separate from the quiz engine until a teacher explicitly adds them to a draft quiz.

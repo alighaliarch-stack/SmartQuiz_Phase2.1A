@@ -19,6 +19,7 @@ Run with:
 
 import hashlib
 import hmac
+import ipaddress
 import io
 import json
 import os
@@ -27,6 +28,7 @@ import secrets
 import shutil
 import uuid
 import wave
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +59,7 @@ from starlette.middleware.sessions import SessionMiddleware
 import ai_grading
 import auth
 import models  # noqa: F401  (registers models onto Base before init_db runs)
+import learning_content_ai
 from config import settings
 from database import SessionLocal, get_db, init_db
 from models import Course, Document, DocumentVersion, Flashcard, FlashcardReview, GeneratedQuestion, LearningModule, MusicTrack, Question, Quiz, Student, StudentAccount, StudentAccountEnrollment, StudentAccountFlashcardProgress, StudentAccountFlashcardReview, StudentEnrollment, StudentFlashcardProgress
@@ -117,6 +120,47 @@ STATUS_BADGE_CLASS = {
 }
 
 OPTION_LETTERS = ["A", "B", "C", "D"]
+
+
+def _student_portal_url(request: Request) -> str:
+    configured = settings.PUBLIC_BASE_URL
+    if configured:
+        parsed = urlsplit(configured)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail="PUBLIC_BASE_URL must be an HTTP(S) origin or deployment base path.",
+            )
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="PUBLIC_BASE_URL contains an invalid port.",
+            ) from exc
+        return f"{configured}/student/login"
+
+    parsed_request = urlsplit(str(request.base_url))
+    hostname = parsed_request.hostname or ""
+    is_loopback_or_test = hostname.lower() in {"localhost", "testserver"}
+    if not is_loopback_or_test:
+        try:
+            is_loopback_or_test = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            is_loopback_or_test = False
+    if not is_loopback_or_test:
+        raise HTTPException(
+            status_code=503,
+            detail="Configure PUBLIC_BASE_URL to the student-reachable application address.",
+        )
+    return f"{str(request.base_url).rstrip('/')}/student/login"
 
 # Per-question timer bounds (Phase 1). 15s is short enough to be a
 # genuinely "quick" question without being unusably fast to read and
@@ -946,6 +990,7 @@ def admin_student_accounts_page(
             "modules": modules,
             "assignments_by_account": assignments_by_account,
             "search": search,
+            "student_portal_url": _student_portal_url(request),
         },
     )
 
@@ -1179,6 +1224,7 @@ def admin_learning_dashboard_page(
 ):
     courses = db.query(Course).order_by(Course.name).all()
     modules = db.query(LearningModule).order_by(LearningModule.title).all()
+    draft_quizzes = db.query(Quiz).filter(Quiz.status == "Draft").order_by(Quiz.title).all()
     module_rows = []
     for module in modules:
         approved_flashcards = (
@@ -1267,6 +1313,8 @@ def admin_learning_dashboard_page(
             "courses": courses,
             "modules": modules,
             "module_rows": module_rows,
+            "draft_quizzes": draft_quizzes,
+            "student_portal_url": _student_portal_url(request),
         },
     )
 
@@ -1354,9 +1402,34 @@ def admin_set_flashcard_status(
     if flashcard is None:
         raise HTTPException(status_code=404, detail="Flashcard not found.")
     clean_status = status.strip().upper()
-    if clean_status not in {"DRAFT", "APPROVED", "REJECTED"}:
+    if clean_status not in {"DRAFT", "PENDING", "APPROVED", "REJECTED"}:
         raise HTTPException(status_code=400, detail="Invalid flashcard approval status.")
     flashcard.approval_status = clean_status
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/flashcards/{flashcard_id}/edit")
+def admin_edit_generated_flashcard(
+    flashcard_id: int,
+    front: str = Form(...),
+    back: str = Form(...),
+    explanation: str = Form(""),
+    topic: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    flashcard = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
+    if flashcard is None:
+        raise HTTPException(status_code=404, detail="Flashcard not found.")
+    clean_front = front.strip()
+    clean_back = back.strip()
+    if not clean_front or len(clean_front) > 4000 or not clean_back or len(clean_back) > 4000:
+        raise HTTPException(status_code=400, detail="Flashcard question and answer are required and must be at most 4000 characters.")
+    flashcard.front = clean_front
+    flashcard.back = clean_back
+    flashcard.explanation = explanation.strip()
+    flashcard.topic = topic.strip()[:150]
+    flashcard.approval_status = "PENDING"
     db.commit()
     return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
 
@@ -1371,11 +1444,140 @@ def admin_set_generated_question_status(
     if question is None:
         raise HTTPException(status_code=404, detail="Generated question not found.")
     clean_status = status.strip().upper()
-    if clean_status not in {"DRAFT", "APPROVED", "REJECTED"}:
+    if clean_status not in {"DRAFT", "PENDING", "APPROVED", "REJECTED"}:
         raise HTTPException(status_code=400, detail="Invalid question approval status.")
     question.approval_status = clean_status
     db.commit()
     return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/questions/{question_id}/edit")
+def admin_edit_generated_question(
+    question_id: int,
+    question_text: str = Form(...),
+    question_type: str = Form(...),
+    answer_options: str = Form("[]"),
+    correct_answer: str = Form(...),
+    explanation: str = Form(""),
+    topic: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    question = db.query(GeneratedQuestion).filter(GeneratedQuestion.id == question_id).first()
+    if question is None:
+        raise HTTPException(status_code=404, detail="Generated question not found.")
+    clean_text = question_text.strip()
+    if not clean_text or len(clean_text) > 4000:
+        raise HTTPException(status_code=400, detail="Question text is required and must be at most 4000 characters.")
+    if question_type not in {"mcq_single", "true_false", "short_answer"}:
+        raise HTTPException(status_code=400, detail="Unsupported generated question type.")
+    try:
+        options = json.loads(answer_options)
+        correct = json.loads(correct_answer)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Options and correct answer must be valid JSON.") from exc
+    if question_type == "mcq_single":
+        if (
+            not isinstance(options, list)
+            or len(options) != 4
+            or any(not isinstance(option, str) or not option.strip() for option in options)
+            or len({option.strip().casefold() for option in options}) != 4
+            or not isinstance(correct, str)
+            or correct not in [option.strip() for option in options]
+        ):
+            raise HTTPException(status_code=400, detail="Multiple-choice questions need four distinct options and a matching correct answer.")
+        options = [option.strip() for option in options]
+    elif question_type == "true_false":
+        if not isinstance(correct, str) or correct not in {"True", "False"}:
+            raise HTTPException(status_code=400, detail="True/false correct answer must be True or False.")
+        options = ["True", "False"]
+    else:
+        if (
+            not isinstance(correct, list)
+            or not correct
+            or any(not isinstance(answer, str) or not answer.strip() for answer in correct)
+        ):
+            raise HTTPException(status_code=400, detail="Short-answer questions need at least one accepted answer.")
+        correct = [answer.strip() for answer in correct]
+        options = []
+    question.question_text = clean_text
+    question.question_type = question_type
+    question.answer_options = json.dumps(options, ensure_ascii=False)
+    question.correct_answer = json.dumps(correct, ensure_ascii=False)
+    question.explanation = explanation.strip()
+    question.topic = topic.strip()[:150]
+    question.approval_status = "PENDING"
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+
+
+@app.post("/admin/learning/questions/{question_id}/add-to-quiz")
+def admin_add_generated_question_to_quiz(
+    question_id: int,
+    quiz_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    generated = db.query(GeneratedQuestion).filter(
+        GeneratedQuestion.id == question_id,
+        GeneratedQuestion.approval_status == "APPROVED",
+    ).first()
+    if generated is None:
+        raise HTTPException(status_code=409, detail="Approve the generated question before adding it to a quiz.")
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    if quiz.status != "Draft":
+        raise HTTPException(status_code=409, detail="Generated questions can only be added to a draft quiz.")
+    existing = db.query(Question.id).filter(
+        Question.quiz_id == quiz.id,
+        Question.question_text == generated.question_text,
+    ).first()
+    if existing is not None:
+        return RedirectResponse(url=f"/admin/quizzes/{quiz.id}?success=question_already_added", status_code=303)
+
+    try:
+        options = json.loads(generated.answer_options or "[]")
+        correct_answer = json.loads(generated.correct_answer or "null")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=409, detail="Generated question data is invalid; edit it before adding.") from exc
+    if generated.question_type == "mcq_single":
+        if (
+            not isinstance(options, list)
+            or len(options) != 4
+            or any(not isinstance(option, str) or not option.strip() for option in options)
+            or len({option.strip().casefold() for option in options}) != 4
+            or not isinstance(correct_answer, str)
+            or correct_answer not in [option.strip() for option in options]
+        ):
+            raise HTTPException(status_code=409, detail="Generated multiple-choice content is incomplete; edit it before adding.")
+        options = [option.strip() for option in options]
+    elif generated.question_type == "true_false":
+        options = ["True", "False"]
+        if correct_answer not in options:
+            raise HTTPException(status_code=409, detail="Generated true/false content is incomplete; edit it before adding.")
+    elif generated.question_type == "short_answer":
+        options = []
+        if (
+            not isinstance(correct_answer, list)
+            or not correct_answer
+            or any(not isinstance(answer, str) or not answer.strip() for answer in correct_answer)
+        ):
+            raise HTTPException(status_code=409, detail="Generated short-answer content is incomplete; edit it before adding.")
+        correct_answer = [answer.strip() for answer in correct_answer]
+    else:
+        raise HTTPException(status_code=409, detail="This generated question type is not supported by the quiz builder.")
+
+    db.add(Question(
+        quiz_id=quiz.id,
+        question_text=generated.question_text,
+        question_type=generated.question_type,
+        points=max(1, generated.points_suggestion),
+        options=json.dumps(options, ensure_ascii=False),
+        correct_answer=json.dumps(correct_answer, ensure_ascii=False),
+        created_at=datetime.now(timezone.utc),
+        grading_notes=None,
+    ))
+    db.commit()
+    return RedirectResponse(url=f"/admin/quizzes/{quiz.id}?success=question_created", status_code=303)
 
 
 @app.post("/admin/learning/modules/{module_id}/publish")
@@ -1537,6 +1739,7 @@ async def admin_upload_document(
             "storage_filename": document.storage_filename,
             "extraction_status": document.extraction_status,
             "extraction_error": document.extraction_error,
+            "extracted_characters": len(document.extracted_text or ""),
         },
     }
     if "text/html" in request.headers.get("accept", ""):
@@ -1550,68 +1753,309 @@ async def admin_list_documents(module_id: int, db: Session = Depends(get_db)):
     if not module:
         raise HTTPException(status_code=404, detail="Module not found")
     docs = db.query(Document).filter(Document.module_id == module.id).order_by(Document.created_at.desc()).all()
-    return JSONResponse({"documents": [{"id": d.id, "title": d.title, "extraction_status": d.extraction_status, "storage_filename": d.storage_filename} for d in docs]})
+    return JSONResponse({
+        "documents": [
+            {
+                "id": document.id,
+                "title": document.title,
+                "storage_filename": document.storage_filename,
+                "extraction_status": document.extraction_status,
+                "extraction_error": document.extraction_error,
+                "extracted_characters": len(document.extracted_text or ""),
+            }
+            for document in docs
+        ]
+    })
+
+
+@app.get("/admin/learning/documents/{document_id}")
+def admin_inspect_document(
+    document_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.is_archived.is_(False),
+    ).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    version = (
+        db.query(DocumentVersion)
+        .filter(
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.is_current.is_(True),
+        )
+        .order_by(DocumentVersion.version_number.desc())
+        .first()
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="teacher_document_inspection.html",
+        context={
+            "app_name": settings.APP_NAME,
+            "document": document,
+            "version": version,
+            "extracted_text": document.extracted_text or "",
+        },
+    )
+
+
+@app.get("/admin/learning/documents/{document_id}/file")
+def admin_download_source_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.is_archived.is_(False),
+    ).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    root = LEARNING_UPLOADS_DIR.resolve()
+    path = (root / document.storage_filename).resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(status_code=404, detail="Source file not found.")
+    return FileResponse(
+        path,
+        media_type=document.mime_type,
+        filename=Path(document.original_filename).name,
+        content_disposition_type="attachment",
+    )
+
+
+def _document_for_generation(
+    db: Session,
+    document_id: int,
+    module_id: int | None = None,
+) -> tuple[Document, DocumentVersion]:
+    query = db.query(Document).filter(
+        Document.id == document_id,
+        Document.is_archived.is_(False),
+    )
+    if module_id is not None:
+        query = query.filter(Document.module_id == module_id)
+    document = query.first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if document.extraction_status != "EXTRACTED" or not (document.extracted_text or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail=document.extraction_error or "The document has no successfully extracted text.",
+        )
+    version = (
+        db.query(DocumentVersion)
+        .filter(
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.is_current.is_(True),
+        )
+        .order_by(DocumentVersion.version_number.desc())
+        .first()
+    )
+    if version is None:
+        raise HTTPException(status_code=409, detail="The document has no current version record.")
+    if version.extraction_status != "EXTRACTED" or not (version.extracted_text or "").strip():
+        raise HTTPException(status_code=422, detail="The current document version has no successfully extracted text.")
+    return document, version
+
+
+def _create_document_flashcards(
+    db: Session,
+    document: Document,
+    version: DocumentVersion,
+    count: int,
+) -> list[Flashcard]:
+    try:
+        generated = learning_content_ai.generate_flashcards(
+            version.extracted_text or "",
+            document.title,
+            count,
+        )
+    except learning_content_ai.ContentGenerationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    existing_fronts = {
+        " ".join(front.casefold().split())
+        for (front,) in db.query(Flashcard.front).filter(
+            Flashcard.module_id == document.module_id
+        ).all()
+    }
+    if any(" ".join(item["front"].casefold().split()) in existing_fronts for item in generated.items):
+        raise HTTPException(
+            status_code=409,
+            detail="Generated content duplicates an existing flashcard; no cards were saved.",
+        )
+    cards = [
+        Flashcard(
+            module_id=document.module_id,
+            source_document_id=document.id,
+            source_document_version_id=version.id,
+            front=item["front"],
+            back=item["back"],
+            explanation=item["explanation"],
+            topic=item["topic"] or document.title,
+            source_reference=item["source_reference"],
+            approval_status="PENDING",
+            ai_provider=generated.provider,
+            ai_model=generated.model,
+        )
+        for item in generated.items
+    ]
+    db.add_all(cards)
+    db.commit()
+    for card in cards:
+        db.refresh(card)
+    return cards
+
+
+def _create_document_questions(
+    db: Session,
+    document: Document,
+    version: DocumentVersion,
+    count: int,
+) -> list[GeneratedQuestion]:
+    try:
+        generated = learning_content_ai.generate_questions(
+            version.extracted_text or "",
+            document.title,
+            count,
+        )
+    except learning_content_ai.ContentGenerationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    existing_questions = {
+        " ".join(text.casefold().split())
+        for (text,) in db.query(GeneratedQuestion.question_text).filter(
+            GeneratedQuestion.module_id == document.module_id
+        ).all()
+    }
+    if any(
+        " ".join(item["question_text"].casefold().split()) in existing_questions
+        for item in generated.items
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Generated content duplicates an existing generated question; nothing was saved.",
+        )
+    questions = [
+        GeneratedQuestion(
+            module_id=document.module_id,
+            source_document_id=document.id,
+            source_document_version_id=version.id,
+            question_text=item["question_text"],
+            question_type=item["question_type"],
+            answer_options=json.dumps(item["answer_options"], ensure_ascii=False),
+            correct_answer=json.dumps(item["correct_answer"], ensure_ascii=False),
+            explanation=item["explanation"],
+            topic=item["topic"] or document.title,
+            source_reference=item["source_reference"],
+            approval_status="PENDING",
+            ai_provider=generated.provider,
+            ai_model=generated.model,
+        )
+        for item in generated.items
+    ]
+    db.add_all(questions)
+    db.commit()
+    for question in questions:
+        db.refresh(question)
+    return questions
+
+
+@app.post("/admin/learning/documents/{document_id}/generate/flashcards")
+def admin_generate_flashcards(
+    document_id: int,
+    request: Request,
+    count: int = Form(10),
+    db: Session = Depends(get_db),
+):
+    document, version = _document_for_generation(db, document_id)
+    cards = _create_document_flashcards(db, document, version, count)
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return JSONResponse({
+        "status": "pending_review",
+        "generated": len(cards),
+        "provider": cards[0].ai_provider if cards else None,
+        "model": cards[0].ai_model if cards else None,
+        "flashcards": [
+            {
+                "id": card.id,
+                "front": card.front,
+                "back": card.back,
+                "source_reference": card.source_reference,
+                "approval_status": card.approval_status,
+            }
+            for card in cards
+        ],
+    })
+
+
+@app.post("/admin/learning/documents/{document_id}/generate/questions")
+def admin_generate_questions(
+    document_id: int,
+    request: Request,
+    count: int = Form(6),
+    db: Session = Depends(get_db),
+):
+    document, version = _document_for_generation(db, document_id)
+    questions = _create_document_questions(db, document, version, count)
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return JSONResponse({
+        "status": "pending_review",
+        "generated": len(questions),
+        "provider": questions[0].ai_provider if questions else None,
+        "model": questions[0].ai_model if questions else None,
+        "questions": [
+            {
+                "id": item.id,
+                "question_text": item.question_text,
+                "question_type": item.question_type,
+                "source_reference": item.source_reference,
+                "approval_status": item.approval_status,
+            }
+            for item in questions
+        ],
+    })
 
 
 @app.post("/admin/learning/modules/{module_id}/generate/flashcards")
-async def admin_generate_flashcards(module_id: int, db: Session = Depends(get_db)):
-    module = db.query(LearningModule).filter(LearningModule.id == module_id).first()
-    if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
-    documents = db.query(Document).filter(Document.module_id == module.id).all()
-    items: list[Flashcard] = []
-    for idx, document in enumerate(documents[:3], start=1):
-        body = (document.extracted_text or "").strip()
-        if not body:
-            continue
-        chunk = " ".join(body.split()[:16])
-        flashcard = Flashcard(
-            module_id=module.id,
-            source_document_id=document.id,
-            front=f"What is the key idea in {document.title}?",
-            back=chunk[:500] if chunk else document.title,
-            explanation="Generated from the uploaded source material.",
-            topic=document.title,
-            difficulty="medium",
-            source_reference=document.storage_filename,
-            approval_status="DRAFT",
-        )
-        db.add(flashcard)
-        items.append(flashcard)
-    db.commit()
-    return JSONResponse({"status": "ok", "generated": len(items), "flashcards": [{"id": item.id, "front": item.front, "back": item.back} for item in items]})
+def admin_generate_module_flashcards(
+    module_id: int,
+    request: Request,
+    document_id: int = Form(...),
+    count: int = Form(10),
+    db: Session = Depends(get_db),
+):
+    document, version = _document_for_generation(db, document_id, module_id)
+    cards = _create_document_flashcards(db, document, version, count)
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return JSONResponse({
+        "status": "pending_review",
+        "generated": len(cards),
+        "flashcards": [{"id": card.id, "front": card.front} for card in cards],
+    })
 
 
 @app.post("/admin/learning/modules/{module_id}/generate/questions")
-async def admin_generate_questions(module_id: int, db: Session = Depends(get_db)):
-    module = db.query(LearningModule).filter(LearningModule.id == module_id).first()
-    if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
-    documents = db.query(Document).filter(Document.module_id == module.id).all()
-    generated: list[GeneratedQuestion] = []
-    for idx, document in enumerate(documents[:3], start=1):
-        text = (document.extracted_text or "").strip()
-        if not text:
-            continue
-        summary = " ".join(text.split()[:18])
-        question = GeneratedQuestion(
-            module_id=module.id,
-            source_document_id=document.id,
-            question_text=f"Based on {document.title}, what is the main concept highlighted?",
-            question_type="mcq_single",
-            answer_options=json.dumps([summary[:80], "Example answer", "Alternative answer", "Another option"]),
-            correct_answer=json.dumps(summary[:80]),
-            explanation="Use the source document as the evidence base for the answer.",
-            points_suggestion=1,
-            difficulty="medium",
-            topic=document.title,
-            source_reference=document.storage_filename,
-            approval_status="DRAFT",
-        )
-        db.add(question)
-        generated.append(question)
-    db.commit()
-    return JSONResponse({"status": "ok", "generated": len(generated), "questions": [{"id": item.id, "question_text": item.question_text, "approval_status": item.approval_status} for item in generated]})
+def admin_generate_module_questions(
+    module_id: int,
+    request: Request,
+    document_id: int = Form(...),
+    count: int = Form(6),
+    db: Session = Depends(get_db),
+):
+    document, version = _document_for_generation(db, document_id, module_id)
+    questions = _create_document_questions(db, document, version, count)
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return JSONResponse({
+        "status": "pending_review",
+        "generated": len(questions),
+        "questions": [{"id": item.id, "question_text": item.question_text} for item in questions],
+    })
 
 
 @app.post("/admin/learning/flashcards/{flashcard_id}/approve")
@@ -1836,51 +2280,75 @@ def _validate_document_upload(file: UploadFile, max_bytes: int = 20 * 1024 * 102
 
 
 def _extract_document_text(path: Path) -> tuple[str, str, str | None]:
-    """Extract a best-effort text body and a status string from a supported source document."""
+    """Extract searchable text with stable page, slide, or paragraph citations."""
     suffix = path.suffix.lower()
-    if suffix == ".txt":
-        try:
+    try:
+        sections: list[tuple[str, str]] = []
+        if suffix == ".txt":
             data = path.read_bytes()
-            text = data.decode("utf-8", errors="strict")
-            return text, "EXTRACTED", None
-        except UnicodeDecodeError:
             try:
-                return path.read_bytes().decode("latin-1", errors="replace"), "EXTRACTED", None
-            except Exception as exc:
-                return "", "ERROR", str(exc)
+                text = data.decode("utf-8-sig", errors="strict")
+            except UnicodeDecodeError:
+                text = data.decode("latin-1", errors="strict")
+            paragraphs = [part.strip() for part in re.split(r"\r?\n\s*\r?\n", text) if part.strip()]
+            sections = [(f"Paragraph {index}", paragraph) for index, paragraph in enumerate(paragraphs, 1)]
+        elif suffix == ".pdf":
+            if path.read_bytes()[:5] != b"%PDF-":
+                return "", "ERROR", "Invalid PDF signature."
+            from pypdf import PdfReader
 
-    if suffix == ".pdf":
-        data = path.read_bytes()[:4096]
-        if b"%PDF-" not in data:
-            return "", "ERROR", "Invalid PDF signature."
-        if b"/Subtype /Image" in data:
-            return "", "OCR_REQUIRED", "This PDF appears to be scanned or image-based and requires OCR."
-        return "", "EXTRACTED", None
+            reader = PdfReader(str(path), strict=False)
+            for page_number, page in enumerate(reader.pages, 1):
+                page_text = (page.extract_text() or "").strip()
+                if page_text:
+                    sections.append((f"Page {page_number}", page_text))
+        elif suffix == ".docx":
+            import zipfile
 
-    if suffix in {".docx", ".pptx"}:
-        import zipfile
-        try:
             with zipfile.ZipFile(path) as archive:
-                text_chunks: list[str] = []
-                if suffix == ".docx":
-                    for name in archive.namelist():
-                        if name.endswith("word/document.xml"):
-                            text = archive.read(name).decode("utf-8", errors="ignore")
-                            matches = re.findall(r"<w:t[^>]*>(.*?)</w:t>", text, flags=re.DOTALL)
-                            text_chunks.extend(match for match in matches if match.strip())
-                else:
-                    for name in archive.namelist():
-                        if name.startswith("ppt/slides/") and name.endswith(".xml"):
-                            text = archive.read(name).decode("utf-8", errors="ignore")
-                            matches = re.findall(r"<a:t[^>]*>(.*?)</a:t>", text, flags=re.DOTALL)
-                            text_chunks.extend(match for match in matches if match.strip())
-                if not text_chunks:
-                    return "", "EXTRACTED", None
-                return "\n".join(text_chunks), "EXTRACTED", None
-        except Exception as exc:
-            return "", "ERROR", str(exc)
+                xml = ET.fromstring(archive.read("word/document.xml"))
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            active_section = ""
+            paragraph_number = 0
+            for paragraph in xml.iter(f"{namespace}p"):
+                paragraph_text = "".join(node.text or "" for node in paragraph.iter(f"{namespace}t")).strip()
+                if not paragraph_text:
+                    continue
+                paragraph_number += 1
+                style = paragraph.find(f"{namespace}pPr/{namespace}pStyle")
+                style_name = style.attrib.get(f"{namespace}val", "") if style is not None else ""
+                if style_name.lower().startswith("heading"):
+                    active_section = paragraph_text[:100]
+                reference = f"Section: {active_section}" if active_section else f"Paragraph {paragraph_number}"
+                sections.append((reference, paragraph_text))
+        elif suffix == ".pptx":
+            import zipfile
 
-    return "", "EXTRACTED", None
+            slide_pattern = re.compile(r"^ppt/slides/slide(\d+)\.xml$")
+            with zipfile.ZipFile(path) as archive:
+                slide_names = []
+                for name in archive.namelist():
+                    match = slide_pattern.match(name)
+                    if match:
+                        slide_names.append((int(match.group(1)), name))
+                for slide_number, name in sorted(slide_names):
+                    xml = ET.fromstring(archive.read(name))
+                    slide_text = " ".join(
+                        (node.text or "").strip()
+                        for node in xml.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t")
+                        if (node.text or "").strip()
+                    )
+                    if slide_text:
+                        sections.append((f"Slide {slide_number}", slide_text))
+        else:
+            return "", "ERROR", f"Unsupported document extension: {suffix or '(none)'}."
+    except Exception as exc:
+        return "", "ERROR", f"Could not extract text from the source document ({type(exc).__name__})."
+
+    extracted = "\n\n".join(f"[[SOURCE: {reference.replace(']]', ')')[:120]}]]\n{text}" for reference, text in sections)
+    if not extracted.strip():
+        return "", "NO_TEXT", "No extractable text was found. Scanned PDFs require OCR before AI generation."
+    return extracted, "EXTRACTED", None
 
 
 def _save_uploaded_document(file: UploadFile, *, destination: Path) -> tuple[str, str | None]:
@@ -3736,6 +4204,7 @@ def admin_page(request: Request, success: str | None = None, db: Session = Depen
             "connected_students": connected_students,
             "status_badge_class": STATUS_BADGE_CLASS,
             "success_message": SUCCESS_MESSAGES.get(success),
+            "student_portal_url": _student_portal_url(request),
         },
     )
 
