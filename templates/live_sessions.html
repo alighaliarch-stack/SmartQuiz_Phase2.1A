@@ -1,0 +1,381 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Live Sessions · {{ app_name }}{% endblock %}
+{% block page_title %}Live Sessions{% endblock %}
+
+{% block content %}
+
+  {% if success_message %}
+  <div class="alert alert-success d-flex align-items-center gap-2 mb-4" role="alert"
+       style="background: rgba(63, 163, 77,0.14); border: 1px solid rgba(63, 163, 77,0.4); color: var(--sq-mint); border-radius: 12px;">
+    <i class="bi bi-check-circle-fill"></i>
+    <span>{{ success_message }}</span>
+  </div>
+  {% endif %}
+
+  <div class="mb-4">
+    <h1 class="h3 mb-1">Live Sessions</h1>
+    <p class="sq-note mb-0">Start a session on a published quiz to open it for students, then share the code, link, or QR.</p>
+  </div>
+
+  {% if rows %}
+  {% for row in rows %}
+  {% set quiz = row.quiz %}
+  {% set session = row.session %}
+  <div class="sq-card p-4 mb-3">
+    <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+
+      <div>
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <span class="badge-status {{ status_badge_class.get(quiz.status, 'badge-draft') }}">{{ quiz.status }}</span>
+          {% if session %}
+          <span class="sq-note"><i class="bi bi-key-fill me-1"></i>Code: <strong style="color:var(--sq-text);">{{ session.session_code }}</strong></span>
+          {% endif %}
+        </div>
+        <h2 class="h5 mb-2">
+          <a href="/admin/quizzes/{{ quiz.id }}" style="color: var(--sq-text);">{{ quiz.title }}</a>
+        </h2>
+        <div class="d-flex flex-wrap align-items-center gap-2 sq-note">
+          <span><i class="bi bi-patch-question-fill me-1"></i>{{ quiz.questions|length }} question{{ '' if quiz.questions|length == 1 else 's' }}</span>
+          <span>·</span>
+          <span><i class="bi bi-hourglass-split me-1"></i>{{ quiz.duration_minutes }} min</span>
+          <span>·</span>
+          <span><i class="bi bi-check2-square me-1"></i>{{ quiz.passing_percentage }}% to pass</span>
+          <span>·</span>
+          <span><i class="bi bi-people-fill me-1"></i>{{ row.connected_count }} student{{ '' if row.connected_count == 1 else 's' }} connected</span>
+        </div>
+      </div>
+
+      <div class="d-flex align-items-start gap-2 flex-wrap">
+        {% if row.phase == "PUBLISHED" %}
+        <form method="post" action="/admin/quizzes/{{ quiz.id }}/sessions/start">
+          <button type="submit" class="btn btn-sq btn-sq-primary">
+            <i class="bi bi-play-fill me-2"></i>Start Session
+          </button>
+        </form>
+
+        {% elif row.phase == "WAITING" %}
+        <form method="post" action="/admin/quizzes/{{ quiz.id }}/sessions/start-quiz">
+          <button type="submit" class="btn btn-sq btn-sq-primary" {% if quiz.questions|length == 0 %}disabled title="Add questions to this quiz first"{% endif %}>
+            <i class="bi bi-play-circle-fill me-2"></i>Start Quiz
+          </button>
+        </form>
+        <form method="post" action="/admin/quizzes/{{ quiz.id }}/sessions/end" onsubmit="return confirm('End this session? Students will no longer be able to join.');">
+          <button type="submit" class="btn btn-sq btn-sq-outline" style="color: var(--sq-rose); border-color: rgba(229, 52, 42,0.4);">
+            <i class="bi bi-stop-fill me-2"></i>End Session
+          </button>
+        </form>
+
+        {% elif row.phase.startswith("QUESTION_") %}
+          {% set total_q = quiz.questions|length %}
+          {% set is_last = session.current_question_index >= total_q %}
+        <form method="post" action="/admin/quizzes/{{ quiz.id }}/sessions/next-question">
+          <input type="hidden" name="expected_question" value="{{ session.current_question_index }}">
+          <button type="submit" class="btn btn-sq btn-sq-primary">
+            {% if is_last %}
+              <i class="bi bi-check2-circle me-2"></i>Complete Quiz
+            {% else %}
+              <i class="bi bi-skip-forward-fill me-2"></i>Next Question ({{ session.current_question_index }}/{{ total_q }})
+            {% endif %}
+          </button>
+        </form>
+        <form method="post" action="/admin/quizzes/{{ quiz.id }}/sessions/end" onsubmit="return confirm('End this session? Students will no longer be able to join.');">
+          <button type="submit" class="btn btn-sq btn-sq-outline" style="color: var(--sq-rose); border-color: rgba(229, 52, 42,0.4);">
+            <i class="bi bi-stop-fill me-2"></i>End Session
+          </button>
+        </form>
+
+        {% elif row.phase == "QUIZ_COMPLETED" %}
+        <form method="post" action="/admin/quizzes/{{ quiz.id }}/sessions/finish" onsubmit="return confirm('Finish this session? Its join code will stop working and it will move to Results.');">
+          <button type="submit" class="btn btn-sq btn-sq-primary">
+            <i class="bi bi-flag-fill me-2"></i>Finish Session
+          </button>
+        </form>
+        <a href="/admin/results?session_id={{ session.id }}" class="btn btn-sq btn-sq-outline">
+          <i class="bi bi-bar-chart-line-fill me-2"></i>View Results
+        </a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if row.phase.startswith("QUESTION_") %}
+    <div class="sq-note mt-2 d-flex align-items-center gap-2">
+      <span><i class="bi bi-signpost-split-fill me-1"></i>On question {{ session.current_question_index }} of {{ quiz.questions|length }}</span>
+      {% if row.question_ends_at %}
+      <span>·</span>
+      <span id="teacher-timer-{{ session.id }}" class="fw-semibold" style="color: var(--sq-mint); font-variant-numeric: tabular-nums;">--:--</span>
+      {% endif %}
+    </div>
+    {% elif row.phase == "QUIZ_COMPLETED" %}
+    <div class="sq-note mt-2">
+      <i class="bi bi-check2-circle-fill me-1" style="color: var(--sq-mint);"></i>
+      All {{ quiz.questions|length }} question{{ '' if quiz.questions|length == 1 else 's' }} complete —
+      {{ row.answered_count }} of {{ row.connected_count }} student{{ '' if row.connected_count == 1 else 's' }} answered at least one question.
+      Session is still open; nothing ends until you click Finish Session.
+    </div>
+    {% endif %}
+
+    {% if session %}
+    <hr style="border-color: var(--sq-glass-border); margin: 1.25rem 0;">
+
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h3 class="h6 mb-0"><i class="bi bi-music-note-beamed me-1"></i>Classroom Radio</h3>
+      <span class="sq-note" id="radio-status-{{ session.id }}">—</span>
+    </div>
+    <div class="row g-2 align-items-center">
+      <div class="col-12 col-md-5">
+        <select class="form-select form-select-sm" id="radio-track-select-{{ session.id }}" {% if not music_tracks %}disabled{% endif %}>
+          <option value="">— Select a track —</option>
+          {% for t in music_tracks %}
+          <option value="{{ t.id }}" {% if radio_state and radio_state.track_id == t.id %}selected{% endif %}>{{ t.display_name }}</option>
+          {% endfor %}
+        </select>
+        {% if not music_tracks %}
+        <p class="sq-note mt-1 mb-0" style="font-size:0.78rem;">No tracks yet — <a href="/admin/music" style="color: var(--sq-primary);">upload one</a>.</p>
+        {% endif %}
+      </div>
+      <div class="col-12 col-md-7 d-flex align-items-center gap-2 flex-wrap">
+        <span id="radio-position-{{ session.id }}" class="sq-note" style="font-variant-numeric: tabular-nums; min-width: 96px;">00:00 / --:--</span>
+        <button type="button" class="btn-sq-icon" data-radio-session="{{ session.id }}" data-radio-action="seek" data-delta="-10" title="-10 sec"><i class="bi bi-skip-backward-fill"></i></button>
+        <button type="button" class="btn-sq-icon" data-radio-session="{{ session.id }}" data-radio-action="toggle" title="Play / Pause"><i class="bi bi-play-fill" id="radio-playpause-icon-{{ session.id }}"></i></button>
+        <button type="button" class="btn-sq-icon" data-radio-session="{{ session.id }}" data-radio-action="seek" data-delta="10" title="+10 sec"><i class="bi bi-skip-forward-fill"></i></button>
+        <button type="button" class="btn-sq-icon danger" data-radio-session="{{ session.id }}" data-radio-action="stop" title="Stop"><i class="bi bi-stop-fill"></i></button>
+        <button type="button" class="btn-sq-icon" data-radio-session="{{ session.id }}" data-radio-action="reset" title="Reset to 00:00"><i class="bi bi-arrow-counterclockwise"></i></button>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if session %}
+    <hr style="border-color: var(--sq-glass-border); margin: 1.25rem 0;">
+    <div class="row g-3 align-items-center">
+      <div class="col-auto">
+        <img src="/admin/sessions/{{ session.id }}/qrcode" alt="QR code to join" width="120" height="120"
+             style="border-radius: 12px; background: white; padding: 8px;">
+      </div>
+      <div class="col">
+        <div class="sq-note mb-1">Join Link</div>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <code id="join-link-{{ session.id }}" style="color: var(--sq-text); background: rgba(255,255,255,0.05); padding: 6px 12px; border-radius: 8px; font-size: 0.85rem;">{{ row.join_link }}</code>
+          <button type="button" class="btn btn-sq btn-sq-outline btn-sm" data-copy-target="join-link-{{ session.id }}">
+            <i class="bi bi-clipboard me-1"></i>Copy Join Link
+          </button>
+          <a href="/admin/sessions/{{ session.id }}/qrcode" download="session-{{ session.session_code }}.png" class="btn btn-sq btn-sq-outline btn-sm">
+            <i class="bi bi-download me-1"></i>Download QR (PNG)
+          </a>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="sq-card text-center py-5">
+    <div class="icon-badge mx-auto mb-3" style="width:52px;height:52px;font-size:1.3rem;"><i class="bi bi-broadcast"></i></div>
+    <h3 class="h6 mb-1">No published quizzes yet</h3>
+    <p class="sq-note mb-3">Publish a quiz from its Question Builder page to see it here.</p>
+    <a href="/admin" class="btn btn-sq btn-sq-primary btn-sm">
+      <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+    </a>
+  </div>
+  {% endif %}
+
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    document.querySelectorAll('[data-copy-target]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var el = document.getElementById(btn.getAttribute('data-copy-target'));
+        if (!el) return;
+        navigator.clipboard.writeText(el.textContent.trim()).then(function () {
+          var original = btn.innerHTML;
+          btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied!';
+          setTimeout(function () { btn.innerHTML = original; }, 1600);
+        });
+      });
+    });
+  })();
+</script>
+
+{% for row in rows %}
+{% if row.question_ends_at %}
+<script>
+  // Countdown for "{{ row.quiz.title }}" (session {{ row.session.id }}).
+  // Each card gets its own independent timer/IIFE so multiple live
+  // quizzes on this page don't interfere with each other.
+  (function () {
+    var endsAt = new Date({{ row.question_ends_at|tojson }}).getTime();
+    var display = document.getElementById('teacher-timer-{{ row.session.id }}');
+    var autoAdvance = {{ row.quiz.auto_advance|tojson }};
+    var nextActionUrl = {{ row.next_action_url|tojson }};
+    var expectedQuestion = {{ row.session.current_question_index|tojson }};
+    var fired = false;
+
+    function tick() {
+      if (!display) { clearInterval(handle); return; }
+      var remainingMs = endsAt - Date.now();
+      if (remainingMs <= 0) {
+        display.textContent = '00:00';
+        clearInterval(handle);
+        if (autoAdvance && !fired) {
+          fired = true;
+          // expected_question ties this request to the exact question
+          // THIS timer instance was counting down for — if another tab
+          // or a previous stale timer already advanced the session past
+          // it, the server rejects this as stale instead of advancing
+          // a second time.
+          var body = new URLSearchParams();
+          body.set('expected_question', expectedQuestion);
+          fetch(nextActionUrl, {
+            method: 'POST',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+          })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+              if (data.success) window.location.reload();
+              // if not successful (stale/not_on_a_question), do nothing —
+              // this tab is out of date; leave it be rather than reload
+              // into a confusing state. A manual action or a future poll
+              // elsewhere will reconcile it.
+            })
+            .catch(function () { /* leave the manual button available */ });
+        }
+        return;
+      }
+      var totalSeconds = Math.ceil(remainingMs / 1000);
+      var m = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+      var s = (totalSeconds % 60).toString().padStart(2, '0');
+      display.textContent = m + ':' + s;
+      if (totalSeconds <= 10) display.style.color = 'var(--sq-rose)';
+    }
+
+    tick();
+    var handle = setInterval(tick, 1000);
+  })();
+</script>
+{% endif %}
+{% endfor %}
+
+{% for row in rows %}
+{% if row.session %}
+<script>
+  // Classroom Radio panel for session {{ row.session.id }} ("{{ row.quiz.title }}").
+  // Each session's card gets its own independent IIFE, same reasoning
+  // as the question-countdown timers above: multiple live quizzes on
+  // this page must never share or interfere with each other's state.
+  (function () {
+    var sessionId = {{ row.session.id|tojson }};
+    var sessionCode = {{ row.session.session_code|tojson }};
+    var quizId = {{ row.quiz.id|tojson }};
+    var baseUrl = '/admin/quizzes/' + quizId + '/sessions/';
+
+    var statusEl = document.getElementById('radio-status-' + sessionId);
+    var positionEl = document.getElementById('radio-position-' + sessionId);
+    var playPauseIcon = document.getElementById('radio-playpause-icon-' + sessionId);
+    var trackSelect = document.getElementById('radio-track-select-' + sessionId);
+    if (!statusEl || !positionEl) return;
+
+    var state = {{ row.radio_state|tojson if row.radio_state else 'null' }};
+    var lastPollReceivedAt = Date.now();
+
+    function fmtTime(sec) {
+      if (sec === null || sec === undefined) return '--:--';
+      sec = Math.max(0, Math.round(sec));
+      var m = Math.floor(sec / 60);
+      var s = sec % 60;
+      return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    function currentDisplayPosition() {
+      // Client-side interpolation between polls — same "server anchor,
+      // client ticks locally" idea as the quiz countdown timer, so the
+      // displayed number advances smoothly rather than only updating
+      // once per poll.
+      if (!state) return 0;
+      if (state.status !== 'PLAYING') return state.position;
+      return state.position + (Date.now() - lastPollReceivedAt) / 1000;
+    }
+
+    function render() {
+      if (!state || !state.track_id) {
+        statusEl.textContent = 'No track selected';
+        positionEl.textContent = '00:00 / --:--';
+        if (playPauseIcon) playPauseIcon.className = 'bi bi-play-fill';
+        return;
+      }
+      statusEl.textContent = state.status;
+      positionEl.textContent = fmtTime(currentDisplayPosition()) + ' / ' + fmtTime(state.duration);
+      if (playPauseIcon) playPauseIcon.className = state.status === 'PLAYING' ? 'bi bi-pause-fill' : 'bi bi-play-fill';
+      if (trackSelect && trackSelect.value !== String(state.track_id || '')) {
+        trackSelect.value = state.track_id || '';
+      }
+    }
+
+    function applyNewState(data) {
+      // Stale-response protection: an out-of-order network response
+      // (e.g. a slow request that resolves after a newer one already
+      // landed) must never move the displayed state BACKWARD.
+      if (state && data.revision < state.revision) return;
+      state = data;
+      lastPollReceivedAt = Date.now();
+      render();
+    }
+
+    function poll() {
+      fetch('/session/' + sessionCode + '/radio/status')
+        .then(function (r) { return r.json(); })
+        .then(applyNewState)
+        .catch(function () { /* transient network hiccup — keep polling */ });
+    }
+
+    function sendAction(action, extraParams) {
+      var body = new URLSearchParams(extraParams || {});
+      if (state) body.set('expected_revision', state.revision);
+      fetch(baseUrl + action, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.success) applyNewState(data);
+          // if not successful (stale, or nothing selected yet), just
+          // let the next poll reconcile the displayed state rather
+          // than guessing what should have happened.
+        })
+        .catch(function () { /* transient network hiccup */ });
+    }
+
+    if (trackSelect) {
+      trackSelect.addEventListener('change', function () {
+        if (!trackSelect.value) return;
+        sendAction('radio-select', { track_id: trackSelect.value });
+      });
+    }
+
+    document.querySelectorAll('[data-radio-session="' + sessionId + '"]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var action = btn.getAttribute('data-radio-action');
+        if (action === 'toggle') {
+          sendAction((state && state.status === 'PLAYING') ? 'radio-pause' : 'radio-play');
+        } else if (action === 'seek') {
+          sendAction('radio-seek', { delta_seconds: btn.getAttribute('data-delta') });
+        } else if (action === 'stop') {
+          sendAction('radio-stop');
+        } else if (action === 'reset') {
+          sendAction('radio-reset');
+        }
+      });
+    });
+
+    render();
+    setInterval(function () {
+      if (state && state.status === 'PLAYING') render(); // smooth local tick between polls
+    }, 1000);
+    setInterval(poll, 3000);
+  })();
+</script>
+{% endif %}
+{% endfor %}
+{% endblock %}

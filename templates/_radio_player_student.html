@@ -1,0 +1,150 @@
+{% if session_code %}
+<!-- ===================== CLASSROOM RADIO (student, read-only) =====================
+     No teacher controls exist here — this player only ever displays
+     server state and plays audio locally; it has no route it could call
+     to change playback (see /session/{code}/radio/status, a plain GET
+     with no side effects). Every actual control lives under /admin,
+     behind the teacher auth middleware. -->
+<div class="sq-card p-3 mt-3" id="radio-player-card" style="display:none;">
+  <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
+    <div class="d-flex align-items-center gap-2">
+      <i class="bi bi-music-note-beamed" style="color: var(--sq-mint);"></i>
+      <div>
+        <div class="fw-semibold" id="radio-player-track-name" style="font-size:0.88rem;">—</div>
+        <div class="sq-note" id="radio-player-status" style="font-size:0.76rem;">—</div>
+      </div>
+    </div>
+    <button type="button" class="btn btn-sq btn-sq-outline btn-sm" id="radio-enable-audio-btn" style="display:none;">
+      <i class="bi bi-volume-up-fill me-1"></i>Tap to enable classroom audio
+    </button>
+  </div>
+</div>
+<audio id="radio-audio-el" preload="auto" style="display:none;"></audio>
+
+<script>
+  (function () {
+    var sessionCode = {{ session_code|tojson }};
+    var card = document.getElementById('radio-player-card');
+    var audio = document.getElementById('radio-audio-el');
+    var trackNameEl = document.getElementById('radio-player-track-name');
+    var statusEl = document.getElementById('radio-player-status');
+    var enableBtn = document.getElementById('radio-enable-audio-btn');
+    if (!card || !audio) return;
+
+    // Meaningful drift gets hard-corrected (a seek); anything smaller is
+    // left alone so ordinary network jitter doesn't cause constant tiny
+    // audible jumps. Deliberately not over-engineered with
+    // playback-rate nudging for the in-between range.
+    var DRIFT_HARD_SEEK_SECONDS = 1.5;
+    var PAUSED_DRIFT_SECONDS = 0.3;
+
+    var currentTrackId = null;
+    var lastServerState = null;
+    var lastPollAt = Date.now();
+    var revision = -1;
+
+    function expectedPosition() {
+      if (!lastServerState) return 0;
+      if (lastServerState.status !== 'PLAYING') return lastServerState.position;
+      return lastServerState.position + (Date.now() - lastPollAt) / 1000;
+    }
+
+    function attemptPlay() {
+      var playPromise = audio.play();
+      if (playPromise && playPromise.catch) {
+        playPromise.catch(function () {
+          // Blocked by the browser's autoplay policy — this is expected
+          // and not an error condition; show the legitimate, explicit
+          // user-gesture control the browser requires instead of
+          // retrying silently or attempting to bypass the restriction.
+          enableBtn.style.display = '';
+        });
+      }
+    }
+
+    function applyState(data) {
+      // Stale-response protection: an out-of-order network response
+      // must never move playback backward to an earlier server state —
+      // same principle as every other radio consumer in this app.
+      if (data.revision < revision) return;
+      revision = data.revision;
+      lastServerState = data;
+      lastPollAt = Date.now();
+
+      if (!data.track_id) {
+        card.style.display = 'none';
+        audio.pause();
+        currentTrackId = null;
+        return;
+      }
+      card.style.display = '';
+      trackNameEl.textContent = data.track_name || 'Classroom Radio';
+      statusEl.textContent = data.status.charAt(0) + data.status.slice(1).toLowerCase();
+
+      if (currentTrackId !== data.track_id) {
+        currentTrackId = data.track_id;
+        audio.src = data.track_url;
+        audio.load();
+      }
+
+      // This is what makes a late joiner (or a reconnecting student)
+      // start from the CURRENT authoritative position instead of 0 —
+      // every state application, not just the first one, sets
+      // currentTime from the server-computed expected position.
+      var expected = expectedPosition();
+
+      if (data.status === 'PLAYING') {
+        if (Math.abs(audio.currentTime - expected) > DRIFT_HARD_SEEK_SECONDS || audio.paused) {
+          audio.currentTime = expected;
+        }
+        if (audio.paused) attemptPlay();
+      } else if (data.status === 'PAUSED') {
+        audio.pause();
+        if (Math.abs(audio.currentTime - expected) > PAUSED_DRIFT_SECONDS) {
+          audio.currentTime = expected;
+        }
+      } else {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+    }
+
+    enableBtn.addEventListener('click', function () {
+      // The click itself IS the legitimate user gesture the browser's
+      // autoplay policy requires — this is what actually unlocks
+      // playback, never a workaround/bypass attempt.
+      var expected = expectedPosition();
+      audio.currentTime = expected;
+      audio.play().then(function () {
+        enableBtn.style.display = 'none';
+      }).catch(function () { /* still blocked for some other reason — leave the button up */ });
+    });
+
+    function poll() {
+      fetch('/session/' + sessionCode + '/radio/status')
+        .then(function (r) { return r.json(); })
+        .then(applyState)
+        .catch(function () { /* transient network hiccup — keep polling */ });
+    }
+
+    // Periodic drift correction independent of the poll cadence, so a
+    // student who's been playing for a while without a fresh poll
+    // response still gets corrected on schedule.
+    setInterval(function () {
+      if (!lastServerState || lastServerState.status !== 'PLAYING' || audio.paused) return;
+      var drift = Math.abs(audio.currentTime - expectedPosition());
+      if (drift > DRIFT_HARD_SEEK_SECONDS) audio.currentTime = expectedPosition();
+    }, 4000);
+
+    poll();
+    setInterval(poll, 3000);
+
+    // Reconnection: a backgrounded/suspended tab, or a brief network
+    // drop, must reconcile to the CURRENT server state on return — not
+    // wherever local playback drifted to, and never restart from zero.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') poll();
+    });
+  })();
+</script>
+{% endif %}

@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}My Results · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <header class="sq-hero sq-hero-compact container">
+    <div class="sq-eyebrow sq-animate">
+      <i class="bi bi-person-check-fill"></i> {{ student.name }}
+    </div>
+
+    <div class="sq-card sq-placeholder-panel sq-animate delay-1" style="max-width: 640px;">
+      <div class="icon-badge mx-auto"><i class="bi bi-clipboard-data-fill"></i></div>
+      <h1 style="font-size: clamp(1.6rem, 4vw, 2.1rem);">My Results</h1>
+      <p class="lead-sub mb-4">
+        {% if quiz %}<strong style="color: var(--sq-text);">{{ quiz.title }}</strong>{% else %}Quiz{% endif %}
+        — this is your own result only.
+      </p>
+
+      <div class="row g-3 mb-4 text-start">
+        <div class="col-6 col-sm-3">
+          <div class="sq-card p-3" style="border-radius: 14px;">
+            <div class="val" style="font-size: 1.6rem; font-weight: 800;">{{ total_score }}</div>
+            <div class="sq-note">of {{ max_possible }} points</div>
+          </div>
+        </div>
+        <div class="col-6 col-sm-3">
+          <div class="sq-card p-3" style="border-radius: 14px;">
+            <div class="val" style="font-size: 1.6rem; font-weight: 800;">{{ percentage }}%</div>
+            <div class="sq-note">score</div>
+          </div>
+        </div>
+        <div class="col-6 col-sm-3">
+          <div class="sq-card p-3" style="border-radius: 14px;">
+            <div class="val" style="font-size: 1.6rem; font-weight: 800; color: var(--sq-mint);">{{ correct_count }}</div>
+            <div class="sq-note">correct</div>
+          </div>
+        </div>
+        <div class="col-6 col-sm-3">
+          <div class="sq-card p-3" style="border-radius: 14px;">
+            <div class="val" style="font-size: 1.6rem; font-weight: 800; color: var(--sq-rose-hi);">{{ incorrect_count }}</div>
+            <div class="sq-note">incorrect</div>
+          </div>
+        </div>
+      </div>
+
+      {% if breakdown %}
+      <div class="table-responsive text-start">
+        <table class="table sq-table mb-0">
+          <thead>
+            <tr>
+              <th>Question</th>
+              <th>Your Answer</th>
+              <th>Result</th>
+              <th>Points</th>
+              <th>Response Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in breakdown %}
+            <tr>
+              <td>{{ row.question_text }}</td>
+              <td class="sq-note">{{ row.your_answer if row.answered else "Not answered" }}</td>
+              <td>
+                {% if not row.answered %}
+                  <span class="badge-status badge-draft">UNANSWERED</span>
+                {% elif row.evaluation_status in ["NEEDS_REVIEW", "EVALUATING"] %}
+                  <span class="badge-status badge-live">{{ row.evaluation_status }}</span>
+                {% elif row.is_correct %}
+                  <span class="badge-status" style="background: rgba(63,163,77,0.18); color: var(--sq-mint-hi);">CORRECT</span>
+                {% else %}
+                  <span class="badge-status" style="background: rgba(229,52,42,0.18); color: var(--sq-rose-hi);">INCORRECT</span>
+                {% endif %}
+              </td>
+              <td>{{ row.awarded }} / {{ row.points }}</td>
+              <td class="sq-note">{{ row.response_time_seconds ~ "s" if row.response_time_seconds is not none else "—" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+
+      <a href="/join" class="btn btn-sq btn-sq-outline mt-4">
+        <i class="bi bi-arrow-clockwise me-2"></i>Back to Join
+      </a>
+    </div>
+  </header>
+{% endblock %}

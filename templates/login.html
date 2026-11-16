@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Teacher Login · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <header class="sq-hero sq-hero-compact container">
+    <div class="sq-eyebrow sq-animate">
+      <i class="bi bi-shield-lock-fill"></i> Teacher access
+    </div>
+
+    <div class="sq-card sq-placeholder-panel sq-animate delay-1" style="max-width: 440px;">
+      <div class="icon-badge mx-auto"><i class="bi bi-shield-lock-fill"></i></div>
+      <h1 style="font-size: clamp(1.6rem, 4vw, 2.1rem);">Teacher Login</h1>
+      <p class="lead-sub mb-4">Sign in to manage quizzes, live sessions, and results.</p>
+
+      {% if error %}
+      <div class="d-flex align-items-center gap-2 mb-4 text-start" role="alert"
+           style="background: rgba(229,52,42,0.14); border: 1px solid rgba(229,52,42,0.4); color: var(--sq-rose-hi); border-radius: 12px; padding: 12px 16px;">
+        <i class="bi bi-exclamation-circle-fill"></i>
+        <span>{{ error }}</span>
+      </div>
+      {% endif %}
+
+      <form method="post" action="/login" class="text-start">
+        <input type="hidden" name="next" value="{{ next }}">
+        <div class="mb-4">
+          <label for="teacher-password" class="form-label" style="color: var(--sq-text-dim); font-weight:600; font-size:0.85rem;">Password</label>
+          <input type="password" class="form-control" id="teacher-password" name="password" placeholder="Enter your password" required autofocus
+                 style="background: rgba(255,255,255,0.06); border: 1px solid var(--sq-glass-border); color: var(--sq-text); border-radius: 12px; padding: 0.7rem 0.9rem;">
+        </div>
+        <button type="submit" class="btn btn-sq btn-sq-primary w-100">
+          <i class="bi bi-box-arrow-in-right me-2"></i>Log In
+        </button>
+      </form>
+
+      <p class="sq-note mt-4 mb-0" style="font-size: 0.8rem;">
+        First time here? Check the server console for a temporary password, generated automatically the first time SmartQuiz started.
+      </p>
+    </div>
+  </header>
+{% endblock %}

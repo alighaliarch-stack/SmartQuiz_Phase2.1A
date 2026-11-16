@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Waiting Room · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <header class="sq-hero sq-hero-compact container">
+    <div class="sq-card sq-placeholder-panel sq-animate delay-1">
+      <div class="waiting-orb"><span class="emoji">⏳</span></div>
+
+      <div class="sq-eyebrow mb-2">
+        <i class="bi bi-hourglass-split"></i> Hang tight, {{ student.name }}
+      </div>
+      <h1 style="font-size: clamp(1.6rem, 4vw, 2.1rem);">Waiting for instructor…</h1>
+      <p class="lead-sub mb-4">The quiz will begin automatically on this screen once your instructor starts it.</p>
+
+      <div class="row g-3 text-start mb-1">
+        <div class="col-6">
+          <div class="sq-card stat-card">
+            <div class="icon-badge"><i class="bi bi-patch-question-fill"></i></div>
+            <div class="val" style="font-size:1.15rem;">{{ quiz.title }}</div>
+            <div class="lbl">Current Quiz</div>
+          </div>
+        </div>
+        <div class="col-6">
+          <div class="sq-card stat-card">
+            <div class="icon-badge"><i class="bi bi-person-badge-fill"></i></div>
+            <div class="val" style="font-size:1.15rem;">Instructor</div>
+            <div class="lbl">Hosted By</div>
+          </div>
+        </div>
+        <div class="col-12">
+          <div class="sq-card stat-card">
+            <div class="icon-badge"><i class="bi bi-people-fill"></i></div>
+            <div class="val">{{ connected_count }}</div>
+            <div class="lbl">Connected Students</div>
+          </div>
+        </div>
+      </div>
+
+      <p class="sq-note mt-3" style="color: var(--sq-text-faint); font-size: 0.82rem;">
+        <i class="bi bi-info-circle me-1"></i>You're marked as <strong style="color: var(--sq-mint);">{{ student.status }}</strong>. Keep this page open.
+      </p>
+    </div>
+    {% include "_radio_player_student.html" %}
+  </header>
+{% endblock %}
+
+{% block extra_script %}
+{% if session_code %}
+<script>
+  (function () {
+    var sessionCode = {{ session_code|tojson }};
+    var studentId = {{ student.id|tojson }};
+
+    function poll() {
+      fetch('/session/' + sessionCode + '/status?student_id=' + studentId)
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          // session_status is the single authoritative field — branch on
+          // it explicitly. Never infer state from current_question vs
+          // total_questions; QUIZ_COMPLETED is its own distinct value,
+          // not a numeric edge case of IN_PROGRESS.
+          if (data.session_status === 'SESSION_ENDED') {
+            window.location.href = '/student/session/' + sessionCode + '/ended';
+          } else if (data.student_completed) {
+            // Per-student fact, independent of session_status — a
+            // student can be done even while the session is still
+            // IN_PROGRESS (finished early) or QUIZ_COMPLETED.
+            window.location.href = '/student/session/' + sessionCode + '/completed?student_id=' + studentId;
+          } else if (data.session_status === 'IN_PROGRESS') {
+            window.location.href = '/student/session/' + sessionCode + '/question/' + data.student_current_question + '?student_id=' + studentId;
+          }
+          // else: WAITING (quiz not started), or QUIZ_COMPLETED but this
+          // student never started and so can't be "completed" either —
+          // both cases mean stay right here.
+        })
+        .catch(function () { /* transient network hiccup — keep polling */ });
+    }
+
+    poll(); // check immediately, then every 2s
+    setInterval(poll, 2000);
+
+    // See session_question.html for why: catches up instantly when a
+    // backgrounded/suspended tab becomes visible again, instead of
+    // waiting for the next natural interval tick.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') poll();
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

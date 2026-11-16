@@ -1,0 +1,170 @@
+{% extends "dashboard_base.html" %}
+{% block title %}{{ quiz.title }} · {{ app_name }}{% endblock %}
+{% block page_title %}Question Builder{% endblock %}
+
+{% block content %}
+
+  {% if success_message %}
+  <div class="alert alert-success d-flex align-items-center gap-2 mb-4" role="alert"
+       style="background: rgba(63, 163, 77,0.14); border: 1px solid rgba(63, 163, 77,0.4); color: var(--sq-mint); border-radius: 12px;">
+    <i class="bi bi-check-circle-fill"></i>
+    <span>{{ success_message }}</span>
+  </div>
+  {% endif %}
+
+  <!-- ============================ QUIZ SUMMARY ============================ -->
+  <div class="sq-card p-4 p-md-4 mb-4">
+    <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+      <div>
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <span class="badge-status {{ status_badge_class.get(quiz.status, 'badge-draft') }}">
+            {{ quiz.status }}
+          </span>
+          <span class="sq-note">Quiz #{{ quiz.id }} · Created {{ quiz.created_at.strftime('%b %d, %Y') }}</span>
+        </div>
+        <h1 class="h3 mb-1">{{ quiz.title }}</h1>
+        <p class="sq-note mb-2" style="max-width:560px;">{{ quiz.description if quiz.description else "No description provided." }}</p>
+        <div class="d-flex align-items-center gap-2">
+          <i class="bi bi-patch-question-fill" style="color:var(--sq-mint)"></i>
+          <span class="fw-semibold">{{ questions|length }}</span>
+          <span class="sq-note">question{{ '' if questions|length == 1 else 's' }}</span>
+          <span class="sq-note">·</span>
+          <span class="sq-note"><i class="bi bi-hourglass-split me-1"></i>{{ quiz.duration_minutes }} min</span>
+          <span class="sq-note">·</span>
+          <span class="sq-note"><i class="bi bi-check2-square me-1"></i>{{ quiz.passing_percentage }}% to pass</span>
+        </div>
+      </div>
+
+      <div class="d-flex align-items-start gap-2 flex-wrap">
+        <a href="#" class="btn btn-sq btn-sq-outline" title="Student-facing preview isn't built yet">
+          <i class="bi bi-eye me-2"></i>Preview Quiz
+        </a>
+        {% if quiz.status in ["Draft", "Published"] %}
+        <form method="post" action="/admin/quizzes/{{ quiz.id }}/publish">
+          <button type="submit" class="btn btn-sq btn-sq-primary">
+            {% if quiz.status == "Published" %}
+              <i class="bi bi-arrow-counterclockwise me-2"></i>Unpublish Quiz
+            {% else %}
+              <i class="bi bi-broadcast me-2"></i>Publish Quiz
+            {% endif %}
+          </button>
+        </form>
+        {% else %}
+        <a href="/admin/sessions" class="btn btn-sq btn-sq-primary" title="Manage this quiz's live session">
+          <i class="bi bi-broadcast me-2"></i>Live Sessions
+        </a>
+        {% endif %}
+        <a href="/admin" class="btn btn-sq btn-sq-outline">
+          <i class="bi bi-arrow-left me-2"></i>Back
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================== QUESTIONS ============================== -->
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="h5 mb-0">Questions</h2>
+    <a href="/admin/quizzes/{{ quiz.id }}/questions/new" class="btn btn-sq btn-sq-primary btn-sm">
+      <i class="bi bi-plus-lg me-1"></i>Add Question
+    </a>
+  </div>
+
+  {% if questions %}
+  <div class="sq-card p-3 p-md-4">
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th style="width:44px;">#</th>
+            <th>Question</th>
+            <th>Type</th>
+            <th>Points</th>
+            <th>Duration</th>
+            <th class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for q in questions %}
+          <tr>
+            <td class="sq-note">{{ loop.index }}</td>
+            <td>
+              <div class="d-flex align-items-center gap-2">
+                {% if q.image_path %}
+                <img src="{{ q.image_path }}" alt="" style="width:36px;height:36px;object-fit:cover;border-radius:8px;border:1px solid var(--sq-glass-border);">
+                {% endif %}
+                <span class="fw-semibold">{{ q.question_text[:70] }}{{ "…" if q.question_text|length > 70 else "" }}</span>
+              </div>
+            </td>
+            <td><span class="sq-note">{{ question_type_labels.get(q.question_type, q.question_type) }}</span></td>
+            <td>{{ q.points }}</td>
+            <td class="sq-note">
+              <i class="bi bi-hourglass-split me-1"></i>{{ "%d min"|format(q.duration_seconds // 60) if q.duration_seconds % 60 == 0 and q.duration_seconds >= 60 else "%d sec"|format(q.duration_seconds) }}
+            </td>
+            <td class="text-end">
+              <a href="/admin/quizzes/{{ quiz.id }}/questions/{{ q.id }}/edit" class="btn-sq-icon" title="Edit"><i class="bi bi-pencil"></i></a>
+              <form action="/admin/quizzes/{{ quiz.id }}/questions/{{ q.id }}/duplicate" method="post" class="d-inline">
+                <button type="submit" class="btn-sq-icon" title="Duplicate"><i class="bi bi-copy"></i></button>
+              </form>
+              <form action="/admin/quizzes/{{ quiz.id }}/questions/{{ q.id }}/delete" method="post" class="d-inline"
+                    onsubmit="return confirm('Delete this question? This cannot be undone.');">
+                <button type="submit" class="btn-sq-icon danger" title="Delete"><i class="bi bi-trash3"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="sq-card text-center py-5">
+    <div class="icon-badge mx-auto mb-3" style="width:52px;height:52px;font-size:1.3rem;"><i class="bi bi-patch-question"></i></div>
+    <h3 class="h6 mb-1">No questions yet</h3>
+    <p class="sq-note mb-3">Add your first question to start building this quiz.</p>
+    <a href="/admin/quizzes/{{ quiz.id }}/questions/new" class="btn btn-sq btn-sq-primary btn-sm">
+      <i class="bi bi-plus-lg me-1"></i>Add Question
+    </a>
+  </div>
+  {% endif %}
+
+  <!-- ============================ PAST SESSIONS ============================ -->
+  {% if past_sessions %}
+  <div class="d-flex justify-content-between align-items-center mb-3 mt-4">
+    <h2 class="h5 mb-0">Session History</h2>
+    <span class="sq-note">This quiz can be started again — each run gets its own join code and results, listed here.</span>
+  </div>
+  <div class="sq-card p-3 p-md-4">
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th>Join Code</th>
+            <th>Started</th>
+            <th>Ended</th>
+            <th>Status</th>
+            <th>Students</th>
+            <th class="text-end">Results</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in past_sessions %}
+          <tr>
+            <td class="fw-semibold" style="font-family: monospace;">{{ s.session_code }}</td>
+            <td class="sq-note">{{ s.started_at.strftime('%b %d, %Y %H:%M') }}</td>
+            <td class="sq-note">{{ s.ended_at.strftime('%b %d, %Y %H:%M') if s.ended_at else "—" }}</td>
+            <td><span class="badge-status {{ 'badge-live' if s.status == 'Live' else 'badge-completed' }}">{{ s.status }}</span></td>
+            <td class="sq-note">{{ session_student_counts.get(s.id, 0) }}</td>
+            <td class="text-end">
+              <a href="/admin/results?session_id={{ s.id }}" class="btn btn-sq btn-sq-outline btn-sm">
+                <i class="bi bi-bar-chart-line-fill me-1"></i>View Results
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+{% endblock %}

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}{{ app_name }}{% endblock %}
+
+{% block content %}
+  <!-- =============================== HERO ================================ -->
+  <header class="sq-hero container">
+    <div class="sq-eyebrow sq-animate">
+      <i class="bi bi-stars"></i> Classroom assessment, reimagined
+    </div>
+
+    <h1 class="sq-animate delay-1">{{ app_name }}</h1>
+    <p class="lead-sub sq-animate delay-1">AI-powered classroom assessment platform</p>
+
+    <div class="d-flex flex-column flex-sm-row justify-content-center gap-3 sq-animate delay-2">
+      <a href="/admin" class="btn btn-sq btn-sq-primary">
+        <i class="bi bi-speedometer2 me-2"></i>Teacher Dashboard
+      </a>
+      <a href="/join" class="btn btn-sq btn-sq-outline">
+        <i class="bi bi-phone me-2"></i>Join Quiz
+      </a>
+    </div>
+  </header>
+
+  <!-- ============================= FEATURES =============================== -->
+  <section id="features" class="container pb-5">
+    <div class="row g-4">
+      <div class="col-12 col-md-4 sq-animate">
+        <div class="sq-card">
+          <div class="icon-badge"><i class="bi bi-lightning-charge-fill"></i></div>
+          <h3>Live in seconds</h3>
+          <p>Launch a quiz and have your whole class answering on their own phones almost instantly.</p>
+        </div>
+      </div>
+      <div class="col-12 col-md-4 sq-animate delay-1">
+        <div class="sq-card">
+          <div class="icon-badge"><i class="bi bi-qr-code"></i></div>
+          <h3>No sign-ups</h3>
+          <p>Students join with a name and a QR code — no accounts, no app installs, no friction.</p>
+        </div>
+      </div>
+      <div class="col-12 col-md-4 sq-animate delay-2">
+        <div class="sq-card">
+          <div class="icon-badge"><i class="bi bi-bar-chart-line-fill"></i></div>
+          <h3>Instant insights</h3>
+          <p>Watch scores, response distribution, and a live leaderboard update as answers come in.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,103 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Music Library · {{ app_name }}{% endblock %}
+{% block page_title %}Music Library{% endblock %}
+
+{% block content %}
+
+  {% if success_message %}
+  <div class="alert alert-success d-flex align-items-center gap-2 mb-4" role="alert"
+       style="background: rgba(63, 163, 77,0.14); border: 1px solid rgba(63, 163, 77,0.4); color: var(--sq-mint); border-radius: 12px;">
+    <i class="bi bi-check-circle-fill"></i>
+    <span>{{ success_message }}</span>
+  </div>
+  {% endif %}
+  {% if error_message %}
+  <div class="alert alert-danger d-flex align-items-center gap-2 mb-4" role="alert"
+       style="background: rgba(229,52,42,0.14); border: 1px solid rgba(229,52,42,0.4); color: var(--sq-rose-hi); border-radius: 12px;">
+    <i class="bi bi-exclamation-triangle-fill"></i>
+    <span>{{ error_message }}</span>
+  </div>
+  {% endif %}
+
+  <div class="mb-4">
+    <h1 class="h3 mb-1">Music Library</h1>
+    <p class="sq-note mb-0">A reusable set of tracks — select one for each live session under Live Sessions to run Classroom Radio.</p>
+  </div>
+
+  <!-- ============================== UPLOAD ============================== -->
+  <div class="sq-card p-3 p-md-4 mb-4">
+    <h2 class="h5 mb-3">Upload a Track</h2>
+    <form method="post" action="/admin/music/upload" enctype="multipart/form-data" class="row g-3 align-items-end">
+      <div class="col-12 col-md-5">
+        <label for="display-name" class="form-label">Track Name <span class="sq-note" style="font-weight:400;">(optional)</span></label>
+        <input type="text" class="form-control" id="display-name" name="display_name" placeholder="e.g. Classroom Background">
+      </div>
+      <div class="col-12 col-md-5">
+        <label for="audio-file" class="form-label">Audio File</label>
+        <input type="file" class="form-control" id="audio-file" name="audio_file" accept="audio/*" required>
+        <p class="sq-note mt-1 mb-0" style="font-size:0.78rem;">Allowed: {{ allowed_extensions }} · up to {{ max_size_mb }} MB</p>
+      </div>
+      <div class="col-12 col-md-2">
+        <button type="submit" class="btn btn-sq btn-sq-primary w-100">
+          <i class="bi bi-upload me-2"></i>Upload
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- ============================== LIBRARY ============================== -->
+  <div class="sq-card p-3 p-md-4">
+    <h2 class="h5 mb-3">Library</h2>
+
+    {% if tracks %}
+    <div class="table-responsive">
+      <table class="table sq-table mb-0">
+        <thead>
+          <tr>
+            <th><i class="bi bi-music-note-beamed me-1"></i>Track</th>
+            <th>Duration</th>
+            <th>Size</th>
+            <th>Uploaded</th>
+            <th class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for track in tracks %}
+          <tr>
+            <td class="fw-semibold">{{ track.display_name }}</td>
+            <td class="sq-note">
+              {% if track.duration_seconds %}
+                {{ "%d:%02d"|format(track.duration_seconds // 60, track.duration_seconds % 60) }}
+              {% else %}
+                <span title="Duration is only auto-detected for WAV files — this format's duration isn't known until it plays.">—:—</span>
+              {% endif %}
+            </td>
+            <td class="sq-note">{{ "%.1f"|format(track.file_size_bytes / 1048576) }} MB</td>
+            <td class="sq-note">{{ track.uploaded_at.strftime('%b %d, %Y') }}</td>
+            <td class="text-end">
+              {% if track.id in in_use_track_ids %}
+              <span class="badge-status badge-live" title="Selected for an active live session">
+                <i class="bi bi-broadcast"></i> In use
+              </span>
+              {% else %}
+              <form action="/admin/music/{{ track.id }}/delete" method="post" class="d-inline"
+                    onsubmit="return confirm('Delete {{ track.display_name }}? This cannot be undone.');">
+                <button type="submit" class="btn-sq-icon danger" title="Delete"><i class="bi bi-trash"></i></button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+      <div class="icon-badge mx-auto mb-3" style="width:52px;height:52px;font-size:1.3rem;"><i class="bi bi-music-note-beamed"></i></div>
+      <h3 class="h6 mb-1">No tracks yet</h3>
+      <p class="sq-note mb-0">Upload a track above to make it available for Classroom Radio.</p>
+    </div>
+    {% endif %}
+  </div>
+
+{% endblock %}
