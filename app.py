@@ -25,10 +25,12 @@ import json
 import os
 import re
 import secrets
+import threading
 import shutil
 import uuid
 import wave
 import xml.etree.ElementTree as ET
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,7 +53,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -61,8 +63,10 @@ import auth
 import document_extraction
 import models  # noqa: F401  (registers models onto Base before init_db runs)
 import learning_content_ai
+import question_banks as qb
 from config import settings
 from database import SessionLocal, get_db, init_db
+from models import BankQuestion, QuestionBank
 from models import Course, Document, DocumentVersion, Flashcard, FlashcardReview, GeneratedQuestion, LearningModule, MusicTrack, Question, Quiz, Student, StudentAccount, StudentAccountEnrollment, StudentAccountFlashcardProgress, StudentAccountFlashcardReview, StudentEnrollment, StudentFlashcardProgress
 from models import Response as StudentResponse
 from models import Session as LiveSession
@@ -87,6 +91,8 @@ QUESTION_TYPES = {
 
 LEARNING_UPLOADS_DIR = settings.BASE_DIR / "storage" / "learning"
 LEARNING_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+QUESTION_BANK_UPLOADS_DIR = settings.BASE_DIR / "storage" / "question_banks"
+QUESTION_BANK_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt"}
 DOCUMENT_MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -110,6 +116,7 @@ SUCCESS_MESSAGES = {
     "session_ended": "Session ended.",
     "quiz_started": "Quiz started — students are now on Question 1.",
     "next_question": "Advanced to the next question.",
+    "assembled": "Quiz created from your question banks as a draft. Review it, then publish.",
 }
 
 STATUS_BADGE_CLASS = {
@@ -190,6 +197,20 @@ def _validate_question_duration(raw_value: str) -> tuple[int | None, str | None]
             f"and {QUESTION_DURATION_MAX_SECONDS} seconds (20 minutes)."
         )
     return seconds, None
+
+
+def _combine_duration_parts(duration_seconds: str, minutes: str, seconds: str) -> str:
+    """The question form sends minutes + seconds (Phase 4); older clients
+    still send a single duration_seconds value, which keeps working."""
+    if not (str(minutes or "").strip() or str(seconds or "").strip()):
+        return duration_seconds
+    try:
+        m, s = int(str(minutes).strip() or 0), int(str(seconds).strip() or 0)
+    except ValueError:
+        return "invalid"
+    if m < 0 or s < 0 or s > 59:
+        return "invalid"
+    return str(m * 60 + s)
 
 
 def _format_duration_human(seconds: int) -> str:
@@ -614,7 +635,7 @@ def _student_dashboard_data(db: Session, account: StudentAccount) -> dict:
     for module in modules:
         documents = (
             db.query(Document)
-            .filter(Document.module_id == module.id, Document.is_archived.is_(False))
+            .filter(Document.module_id == module.id, Document.is_archived.is_(False), Document.deleted_at.is_(None))
             .order_by(Document.title)
             .all()
         )
@@ -848,6 +869,7 @@ def student_learning_material(
         .filter(
             Document.id == document_id,
             Document.is_archived.is_(False),
+            Document.deleted_at.is_(None),
             *_live_module_filters(),
         )
         .first()
@@ -1048,7 +1070,7 @@ def admin_student_accounts_page(
         StudentAccount.full_name,
         StudentAccount.is_active,
         StudentAccount.must_change_password,
-    )
+    ).filter(StudentAccount.deleted_at.is_(None))
     if search:
         needle = f"%{search}%"
         query = query.filter(
@@ -1057,8 +1079,20 @@ def admin_student_accounts_page(
             | (StudentAccount.full_name.ilike(needle))
         )
     accounts = query.order_by(StudentAccount.full_name, StudentAccount.id).all()
-    courses = db.query(Course).order_by(Course.name).all()
-    modules = db.query(LearningModule).order_by(LearningModule.title).all()
+    deleted_accounts = (
+        db.query(StudentAccount).filter(StudentAccount.deleted_at.isnot(None))
+        .order_by(StudentAccount.deleted_at.desc()).all()
+    )
+    # Only courses and modules a student can actually be assigned to.
+    courses = (
+        db.query(Course).filter(Course.deleted_at.is_(None), Course.archived_at.is_(None))
+        .order_by(Course.name).all()
+    )
+    course_ids = {course.id for course in courses}
+    modules = [
+        module for module in db.query(LearningModule).order_by(LearningModule.title).all()
+        if module.course_id in course_ids and module.archived_at is None
+    ]
     enrollments = (
         db.query(StudentAccountEnrollment)
         .filter(
@@ -1082,6 +1116,8 @@ def admin_student_accounts_page(
             "courses": courses,
             "modules": modules,
             "assignments_by_account": assignments_by_account,
+            "deleted_accounts": deleted_accounts,
+            "notice": STUDENT_ACCOUNT_NOTICES.get(request.query_params.get("notice", "")),
             "search": search,
             "student_portal_url": _student_portal_url(request),
         },
@@ -1169,6 +1205,7 @@ def admin_edit_student_account(
     account = db.query(StudentAccount).filter(StudentAccount.id == account_id).first()
     if account is None:
         raise HTTPException(status_code=404, detail="Student account not found.")
+    _require_not_deleted(account)
     clean_username = (username or "").strip().lower()
     clean_code = (student_code or "").strip().upper()
     clean_name = (full_name or "").strip()
@@ -1202,6 +1239,7 @@ def admin_set_student_account_status(
     account = db.query(StudentAccount).filter(StudentAccount.id == account_id).first()
     if account is None:
         raise HTTPException(status_code=404, detail="Student account not found.")
+    _require_not_deleted(account)
     account.is_active = active
     if not active:
         account.session_version += 1
@@ -1221,6 +1259,7 @@ def admin_reset_student_password(
     account = db.query(StudentAccount).filter(StudentAccount.id == account_id).first()
     if account is None:
         raise HTTPException(status_code=404, detail="Student account not found.")
+    _require_not_deleted(account)
     temporary_password = secrets.token_urlsafe(12)
     account.password_hash = auth.hash_password(temporary_password)
     account.must_change_password = True
@@ -1259,6 +1298,7 @@ def admin_assign_student_course(
     course = db.query(Course).filter(Course.id == course_id).first()
     if account is None or course is None:
         raise HTTPException(status_code=404, detail="Student account or course not found.")
+    _require_not_deleted(account)
     if not account.is_active:
         raise HTTPException(status_code=409, detail="Activate the student account before assigning it.")
     if course.archived_at is not None or course.deleted_at is not None:
@@ -1310,6 +1350,148 @@ def admin_revoke_student_assignment(
     if "text/html" in request.headers.get("accept", ""):
         return RedirectResponse(url="/admin/student-accounts", status_code=303)
     return JSONResponse({"status": "revoked", "enrollment_id": enrollment.id})
+
+
+# ------------------------------------------------ student account deletion (Phase 4A)
+
+STUDENT_ACCOUNT_NOTICES = {
+    "purged": "The student account had no quiz, review or assignment history, so it was permanently deleted.",
+    "archived": "The student account was deleted from the active list and can no longer log in. "
+                "Its quiz results, review history and assignment records were kept; you can restore it from Deleted accounts.",
+    "anonymized": "The student account was deleted and its name, username and student code were replaced. "
+                  "It can no longer log in. Its quiz results and review history were kept for reporting.",
+    "restored": "The student account was restored. It is inactive: activate it and reassign courses when the student should return.",
+}
+
+
+def _student_account_or_404(db: Session, account_id: int) -> StudentAccount:
+    account = db.get(StudentAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Student account not found.")
+    return account
+
+
+def _student_account_history(db: Session, account: StudentAccount) -> list[tuple[int, str]]:
+    """Every kind of record that depends on a student account, with counts.
+
+    Any non-zero count means the account is part of the academic record and
+    must not be removed from the database."""
+    participant_ids = [row[0] for row in db.query(Student.id).filter(Student.account_id == account.id).all()]
+    checks = [
+        (len(participant_ids), "quiz participation record(s)"),
+        (db.query(StudentResponse).filter(StudentResponse.student_id.in_(participant_ids)).count() if participant_ids else 0,
+         "submitted quiz answer(s)"),
+        (db.query(StudentAccountFlashcardReview).filter(StudentAccountFlashcardReview.account_id == account.id).count(),
+         "flashcard review(s)"),
+        (db.query(StudentAccountFlashcardProgress).filter(StudentAccountFlashcardProgress.account_id == account.id).count(),
+         "flashcard progress record(s)"),
+        (db.query(StudentAccountEnrollment).filter(StudentAccountEnrollment.account_id == account.id).count(),
+         "course or module assignment record(s), including removed ones"),
+    ]
+    return [(count, label) for count, label in checks if count]
+
+
+def _require_not_deleted(account: StudentAccount) -> None:
+    if account.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="This student account is deleted. Restore it first.")
+
+
+@app.get("/admin/student-accounts/{account_id}/delete")
+def admin_delete_student_account_page(request: Request, account_id: int, db: Session = Depends(get_db)):
+    account = _student_account_or_404(db, account_id)
+    history = _student_account_history(db, account)
+    blockers = ["This account is already deleted."] if account.deleted_at is not None else []
+    if history:
+        consequences = [
+            "This account has history that is part of the academic record: "
+            + "; ".join(f"{count} {label}" for count, label in history) + ".",
+            "It will NOT be removed from the database. It will be marked deleted: the student is logged out, "
+            "can no longer log in, and disappears from the active account list.",
+            "Active course assignments are ended. Quiz results, answers and review history stay exactly as they are.",
+            "You can restore it later from Deleted accounts, unless you also anonymise it.",
+        ]
+        options = [{
+            "name": "anonymize", "value": "yes",
+            "label": "Also anonymise this account: replace its full name, username and student code and disable its "
+                     "password. This cannot be undone. Names typed when joining live quizzes stay in those results.",
+        }]
+        button_label = "Delete account (keep history)"
+    else:
+        consequences = [
+            "This account has no quiz participation, answers, flashcard history or assignment records.",
+            "It will be permanently deleted. This cannot be undone.",
+        ]
+        options = []
+        button_label = "Delete account permanently"
+    return _confirm_page(
+        request,
+        title="Delete student account",
+        heading="Delete this student account?",
+        item_summary=f"{account.full_name} · username {account.username} · student code {account.student_code}",
+        consequences=consequences,
+        options=options,
+        blockers=blockers,
+        action_url=f"/admin/student-accounts/{account.id}/delete",
+        button_label=button_label,
+        cancel_url="/admin/student-accounts",
+        active_page="student-accounts",
+    )
+
+
+@app.post("/admin/student-accounts/{account_id}/delete")
+def admin_delete_student_account(
+    request: Request,
+    account_id: int,
+    confirm: str = Form(""),
+    anonymize: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    _require_confirmation(confirm)
+    account = _student_account_or_404(db, account_id)
+    _require_not_deleted(account)
+    now = datetime.now(timezone.utc)
+    if not _student_account_history(db, account):
+        db.delete(account)
+        db.commit()
+        outcome = "purged"
+    else:
+        account.deleted_at = now
+        account.is_active = False
+        account.session_version += 1  # ends any open student session
+        account.updated_at = now
+        db.query(StudentAccountEnrollment).filter(
+            StudentAccountEnrollment.account_id == account.id,
+            StudentAccountEnrollment.status == "Active",
+        ).update({"status": "Revoked"}, synchronize_session=False)
+        outcome = "archived"
+        if anonymize == "yes":
+            account.anonymized_at = now
+            account.full_name = f"Deleted student #{account.id}"
+            account.username = f"deleted-{account.id}-{secrets.token_hex(4)}"
+            account.student_code = f"DELETED-{account.id}"
+            account.password_hash = auth.hash_password(secrets.token_urlsafe(32))
+            account.must_change_password = True
+            outcome = "anonymized"
+        db.commit()
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url=f"/admin/student-accounts?notice={outcome}", status_code=303)
+    return JSONResponse({"status": outcome, "account_id": account_id})
+
+
+@app.post("/admin/student-accounts/{account_id}/restore")
+def admin_restore_student_account(request: Request, account_id: int, db: Session = Depends(get_db)):
+    account = _student_account_or_404(db, account_id)
+    if account.deleted_at is None:
+        raise HTTPException(status_code=409, detail="This student account is not deleted.")
+    if account.anonymized_at is not None:
+        raise HTTPException(status_code=409, detail="An anonymised account cannot be restored.")
+    account.deleted_at = None
+    account.is_active = False  # the teacher reactivates it deliberately
+    account.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/admin/student-accounts?notice=restored", status_code=303)
+    return JSONResponse({"status": "restored", "account_id": account.id, "is_active": False})
 
 
 @app.get("/admin/learning/dashboard")
@@ -1388,8 +1570,9 @@ def admin_learning_dashboard_page(
         }
         module_rows.append({
             "module": module,
-            "documents": [document for document in documents if not document.is_archived],
-            "archived_documents": [document for document in documents if document.is_archived],
+            "documents": [document for document in documents if not document.is_archived and document.deleted_at is None],
+            "archived_documents": [document for document in documents if document.is_archived and document.deleted_at is None],
+            "deleted_documents": [document for document in documents if document.deleted_at is not None],
             "progress_rows": progress_rows,
             "live_flashcard_count": len(approved_flashcard_ids),
             "content_counts": {
@@ -1422,6 +1605,8 @@ def admin_learning_dashboard_page(
             },
             "student_portal_url": _student_portal_url(request),
             "notice": request.query_params.get("notice"),
+            "document_notice": DOCUMENT_NOTICES.get(request.query_params.get("notice", "")),
+            "generation_flash": request.session.pop("generation_flash", None),
         },
     )
 
@@ -1536,6 +1721,24 @@ CONTENT_NOTICES = {
 }
 
 
+def _content_bank_notice(request: Request, documents: dict) -> str | None:
+    params = request.query_params
+    notice = params.get("notice", "")
+    generated, kind = params.get("generated", ""), params.get("generated_kind", "")
+    if notice == "saved" and generated.isdigit() and kind in {"flashcards", "questions"}:
+        count = int(generated)
+        label = {"flashcards": ("flashcard", "flashcards"), "questions": ("quiz question", "quiz questions")}[kind]
+        document_id = params.get("document_id", "")
+        document = documents.get(int(document_id)) if document_id.isdigit() else None
+        source = f" from “{document.title}”" if document else ""
+        if params.get("repeat") == "1":
+            return (f"This request was already completed: {count} {label[0] if count == 1 else label[1]}{source} "
+                    "were saved earlier. Nothing new was created.")
+        return (f"{count} {label[0] if count == 1 else label[1]} generated{source} and saved to the content bank, "
+                "with their source references. They are not visible to students until you assign and publish them.")
+    return CONTENT_NOTICES.get(notice)
+
+
 def _content_status(item) -> dict:
     """Teacher-facing lifecycle state of a flashcard or generated question."""
     if item.deleted_at is not None:
@@ -1606,16 +1809,24 @@ def _confirm_page(request: Request, **context):
     )
 
 
+def _optional_id(value: str | None) -> int | None:
+    """A filter id from a query string. Filter forms submit "" for "Any ...",
+    which must mean "no filter", not a validation error page."""
+    value = (value or "").strip()
+    return int(value) if value.isdigit() else None
+
+
 @app.get("/admin/content")
 def admin_content_bank(
     request: Request,
     kind: str = "all",
     status: str = "active",
-    course_id: int | None = None,
-    document_id: int | None = None,
+    course_id: str = "",
+    document_id: str = "",
     q: str = "",
     db: Session = Depends(get_db),
 ):
+    course_id, document_id = _optional_id(course_id), _optional_id(document_id)
     wanted = CONTENT_STATUS_FILTERS.get(status, CONTENT_STATUS_FILTERS["active"])
     search = q.strip().casefold()
     documents = {document.id: document for document in db.query(Document).all()}
@@ -1667,10 +1878,16 @@ def admin_content_bank(
             "counts": counts,
             "filters": {"kind": kind, "status": status, "course_id": course_id, "document_id": document_id, "q": q},
             "courses": db.query(Course).filter(Course.deleted_at.is_(None)).order_by(Course.name).all(),
-            "documents": sorted(documents.values(), key=lambda document: document.title.casefold()),
+            "documents": sorted(
+                (
+                    document for document in documents.values()
+                    if _document_unavailable_reason(document) is None or document.id == document_id
+                ),
+                key=lambda document: document.title.casefold(),
+            ),
             "placement_modules": placement_modules,
             "draft_quizzes": db.query(Quiz).filter(Quiz.status == "Draft").order_by(Quiz.title).all(),
-            "notice": CONTENT_NOTICES.get(request.query_params.get("notice", "")),
+            "notice": _content_bank_notice(request, documents),
             "current_url": str(request.url.path) + ("?" + request.url.query if request.url.query else ""),
         },
     )
@@ -1996,6 +2213,139 @@ def admin_restore_module(module_id: int, db: Session = Depends(get_db)):
     return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
 
 
+def _document_unavailable_reason(document: Document) -> str | None:
+    """Why a source document cannot be used for anything new, or None.
+
+    One rule for every place that offers a document as a source: the
+    content-bank filter, generation, the dashboard and student materials.
+    History (provenance on generated content and quiz snapshots) is never
+    affected by this."""
+    if document.deleted_at is not None:
+        return "deleted"
+    if document.is_archived:
+        return "archived"
+    course, module = document.course, document.module
+    if course is None or course.deleted_at is not None:
+        return "course deleted"
+    if course.archived_at is not None:
+        return "course archived"
+    if module is None or module.archived_at is not None:
+        return "module archived"
+    return None
+
+
+templates.env.globals["document_unavailable_reason"] = _document_unavailable_reason
+
+
+def _document_or_404(db: Session, document_id: int) -> Document:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return document
+
+
+def _document_purge_blockers(db: Session, document: Document) -> list[str]:
+    version_ids = [row[0] for row in db.query(DocumentVersion.id).filter(DocumentVersion.document_id == document.id).all()]
+
+    def linked(model) -> int:
+        condition = model.source_document_id == document.id
+        if version_ids:
+            condition = or_(condition, model.source_document_version_id.in_(version_ids))
+        return db.query(model).filter(condition).count()
+
+    checks = [
+        (linked(Flashcard), "flashcard(s) generated from it (including archived or deleted ones)"),
+        (linked(GeneratedQuestion), "generated question(s) from it (including archived or deleted ones)"),
+        (linked(Question), "quiz question(s) whose provenance points to it"),
+    ]
+    return [f"It is the recorded source of {count} {label}." for count, label in checks if count]
+
+
+DOCUMENT_NOTICES = {
+    "document_archived": "Document archived. It is hidden from students and from new generation; everything generated from it is kept.",
+    "document_restored": "Document restored.",
+    "document_deleted": "Document moved to Recently deleted. It is no longer offered as a source anywhere; content generated from it and quiz history are kept.",
+    "document_purged": "Document and its stored file were permanently deleted.",
+}
+
+
+@app.get("/admin/learning/documents/{document_id}/delete")
+def admin_delete_document_page(request: Request, document_id: int, db: Session = Depends(get_db)):
+    document = _document_or_404(db, document_id)
+    return _confirm_page(
+        request,
+        title="Delete document",
+        heading=f"Move “{document.title}” to Recently deleted?",
+        item_summary=f"{document.title} · {document.original_filename}",
+        consequences=[
+            "Students can no longer open it, and it can no longer be used to generate content.",
+            "It disappears from document lists and from the content bank's source filter.",
+            "Flashcards and questions generated from it are NOT deleted, and quizzes and results are not changed. "
+            "Their source still shows this document's name.",
+            "You can restore it from Recently deleted on the learning dashboard.",
+        ],
+        blockers=["This document is already in Recently deleted."] if document.deleted_at is not None else [],
+        action_url=f"/admin/learning/documents/{document.id}/delete",
+        button_label="Move to Recently deleted",
+        cancel_url="/admin/learning/dashboard",
+        active_page="learning",
+    )
+
+
+@app.post("/admin/learning/documents/{document_id}/delete")
+def admin_delete_document(document_id: int, confirm: str = Form(""), db: Session = Depends(get_db)):
+    _require_confirmation(confirm)
+    document = _document_or_404(db, document_id)
+    document.deleted_at = document.deleted_at or datetime.now(timezone.utc)
+    db.commit()
+    return RedirectResponse(url="/admin/learning/dashboard?notice=document_deleted", status_code=303)
+
+
+@app.get("/admin/learning/documents/{document_id}/purge")
+def admin_purge_document_page(request: Request, document_id: int, db: Session = Depends(get_db)):
+    document = _document_or_404(db, document_id)
+    blockers = _document_purge_blockers(db, document)
+    if document.deleted_at is None:
+        blockers.insert(0, "Move the document to Recently deleted first.")
+    return _confirm_page(
+        request,
+        title="Delete document permanently",
+        heading=f"Permanently delete “{document.title}”?",
+        item_summary=f"{document.title} · {document.original_filename}",
+        consequences=[
+            "The document record, all its versions and its stored file are removed. This cannot be undone.",
+            "Only a document that nothing was generated from can be deleted permanently, so no history is lost.",
+        ],
+        blockers=blockers,
+        action_url=f"/admin/learning/documents/{document.id}/purge",
+        button_label="Delete permanently",
+        cancel_url="/admin/learning/dashboard",
+        active_page="learning",
+    )
+
+
+@app.post("/admin/learning/documents/{document_id}/purge")
+def admin_purge_document(document_id: int, confirm: str = Form(""), db: Session = Depends(get_db)):
+    _require_confirmation(confirm)
+    document = _document_or_404(db, document_id)
+    if document.deleted_at is None:
+        raise HTTPException(status_code=409, detail="Move the document to Recently deleted before deleting it permanently.")
+    blockers = _document_purge_blockers(db, document)
+    if blockers:
+        raise HTTPException(status_code=409, detail="Permanent deletion is blocked: " + " ".join(blockers))
+    root = LEARNING_UPLOADS_DIR.resolve()
+    stored = {document.storage_filename} | {version.storage_filename for version in document.versions}
+    db.delete(document)  # versions cascade
+    db.commit()
+    for name in stored:
+        path = (root / name).resolve()
+        still_used = db.query(DocumentVersion.id).filter(DocumentVersion.storage_filename == name).first() or \
+            db.query(Document.id).filter(Document.storage_filename == name).first()
+        if path.parent == root and path.is_file() and not still_used:
+            path.unlink()
+    return RedirectResponse(url="/admin/learning/dashboard?notice=document_purged", status_code=303)
+
+
 @app.post("/admin/learning/documents/{document_id}/archive")
 def admin_archive_document(document_id: int, db: Session = Depends(get_db)):
     """Hide a source document from students and from new generation. Its file,
@@ -2005,7 +2355,7 @@ def admin_archive_document(document_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Document not found.")
     document.is_archived = True
     db.commit()
-    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return RedirectResponse(url="/admin/learning/dashboard?notice=document_archived", status_code=303)
 
 
 @app.post("/admin/learning/documents/{document_id}/restore")
@@ -2013,9 +2363,11 @@ def admin_restore_document(document_id: int, db: Session = Depends(get_db)):
     document = db.get(Document, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found.")
+    # Restores from Archived and from Recently deleted alike.
     document.is_archived = False
+    document.deleted_at = None
     db.commit()
-    return RedirectResponse(url="/admin/learning/dashboard", status_code=303)
+    return RedirectResponse(url="/admin/learning/dashboard?notice=document_restored", status_code=303)
 
 
 def _admin_redirect(next_url: str | None, default: str = "/admin/content") -> RedirectResponse:
@@ -2365,7 +2717,10 @@ async def admin_list_documents(module_id: int, db: Session = Depends(get_db)):
     module = db.query(LearningModule).filter(LearningModule.id == module_id).first()
     if not module:
         raise HTTPException(status_code=404, detail="Module not found")
-    docs = db.query(Document).filter(Document.module_id == module.id).order_by(Document.created_at.desc()).all()
+    docs = (
+        db.query(Document).filter(Document.module_id == module.id, Document.deleted_at.is_(None))
+        .order_by(Document.created_at.desc()).all()
+    )
     return JSONResponse({
         "documents": [
             {
@@ -2437,15 +2792,18 @@ def _document_for_generation(
     document_id: int,
     module_id: int | None = None,
 ) -> tuple[Document, DocumentVersion]:
-    query = db.query(Document).filter(
-        Document.id == document_id,
-        Document.is_archived.is_(False),
-    )
+    query = db.query(Document).filter(Document.id == document_id)
     if module_id is not None:
         query = query.filter(Document.module_id == module_id)
     document = query.first()
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found.")
+    reason = _document_unavailable_reason(document)
+    if reason is not None:
+        raise HTTPException(
+            status_code=404,  # unchanged status for API clients; the reason is in the message
+            detail=f"This document cannot be used to generate content ({reason}). Restore it first.",
+        )
     if document.extraction_status != "EXTRACTED" or not (document.extracted_text or "").strip():
         raise HTTPException(
             status_code=422,
@@ -2472,6 +2830,7 @@ def _create_document_flashcards(
     document: Document,
     version: DocumentVersion,
     count: int,
+    request_token: str | None = None,
 ) -> list[Flashcard]:
     try:
         generated = learning_content_ai.generate_flashcards(
@@ -2480,7 +2839,7 @@ def _create_document_flashcards(
             count,
         )
     except learning_content_ai.ContentGenerationError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc  # __cause__ keeps exc.kind
 
     existing_fronts = {
         " ".join(front.casefold().split())
@@ -2510,8 +2869,15 @@ def _create_document_flashcards(
         )
         for item in generated.items
     ]
-    db.add_all(cards)
-    db.commit()
+    for item in cards:
+        item.generation_request_id = request_token
+    # The whole validated batch is stored in one transaction, or nothing is.
+    try:
+        db.add_all(cards)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     for card in cards:
         db.refresh(card)
     return cards
@@ -2522,6 +2888,7 @@ def _create_document_questions(
     document: Document,
     version: DocumentVersion,
     count: int,
+    request_token: str | None = None,
 ) -> list[GeneratedQuestion]:
     try:
         generated = learning_content_ai.generate_questions(
@@ -2530,7 +2897,7 @@ def _create_document_questions(
             count,
         )
     except learning_content_ai.ContentGenerationError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc  # __cause__ keeps exc.kind
 
     existing_questions = {
         " ".join(text.casefold().split())
@@ -2565,31 +2932,150 @@ def _create_document_questions(
         )
         for item in generated.items
     ]
-    db.add_all(questions)
-    db.commit()
+    for item in questions:
+        item.generation_request_id = request_token
+    # The whole validated batch is stored in one transaction, or nothing is.
+    try:
+        db.add_all(questions)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     for question in questions:
         db.refresh(question)
     return questions
 
 
-@app.post("/admin/learning/documents/{document_id}/generate/flashcards")
-def admin_generate_flashcards(
-    document_id: int,
+# ------------------------------------------------ AI generation (Phase 4A reliability)
+
+GENERATION_LABELS = {"flashcards": ("flashcard", "flashcards"), "questions": ("quiz question", "quiz questions")}
+_REQUEST_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
+_generations_in_progress: set[str] = set()
+_generations_lock = threading.Lock()
+
+
+def _new_request_token() -> str:
+    return secrets.token_urlsafe(18)
+
+
+templates.env.globals["new_request_token"] = _new_request_token
+
+
+def _generation_failure(exc: HTTPException, provider: str) -> dict:
+    """Teacher-facing explanation of a failed generation (never raw JSON)."""
+    cause = exc.__cause__
+    if isinstance(cause, learning_content_ai.ContentGenerationError):
+        kind, technical, attempts = cause.kind, str(cause), cause.attempts
+    elif exc.status_code == 409 and "duplicates" in str(exc.detail):
+        kind, technical, attempts = "duplicate", str(exc.detail), 1
+    else:
+        # Our own checks on the document (archived, no text, ...): safe to show as written.
+        return {"kind": "document", "retry": False, "technical": "",
+                "message": str(exc.detail) + " Nothing was generated or saved."}
+    tried = f" SmartQuiz tried {attempts} times." if attempts > 1 else ""
+    messages = {
+        "unavailable": f"{provider} is temporarily unavailable (it is overloaded or down). Your content has not been lost "
+                       f"and nothing was saved.{tried} Please try again in a moment.",
+        "rate_limited": f"{provider} is receiving too many requests right now (rate limit). Nothing was saved.{tried} "
+                        "Please wait a minute and try again.",
+        "timeout": f"{provider} did not respond in time. Nothing was saved.{tried} Please try again in a moment.",
+        "network": f"SmartQuiz could not reach {provider}. Check this computer's internet connection, then try again. "
+                   "Nothing was saved.",
+        "configuration": f"{provider} is not configured correctly (API key, permission or model name), so nothing was "
+                         "generated. Retrying will not help: check GEMINI_API_KEY and GEMINI_MODEL / AI_CONTENT_MODEL in "
+                         "the .env file and restart SmartQuiz.",
+        "request": f"{provider} rejected the request, so nothing was generated or saved.",
+        "output": f"{provider} answered, but its content did not pass SmartQuiz's checks (for example malformed data or a "
+                  "citation that is not in the document), so nothing was saved. Trying again usually gives a valid result.",
+        "duplicate": "The new batch repeated items that already exist for this module, so nothing was saved. "
+                     "Try again to get a different batch.",
+    }
+    return {
+        "kind": kind,
+        "retry": kind in learning_content_ai.TRANSIENT_KINDS or kind in {"output", "duplicate"},
+        "transient": kind in learning_content_ai.TRANSIENT_KINDS,
+        "message": messages.get(kind, f"{provider} could not generate content. Nothing was saved."),
+        "technical": technical,
+    }
+
+
+def _run_generation(
     request: Request,
-    count: int = Form(10),
-    db: Session = Depends(get_db),
+    db: Session,
+    *,
+    kind: str,
+    document_id: int,
+    module_id: int | None,
+    count: int,
+    request_token: str,
+    action_url: str,
 ):
-    document, version = _document_for_generation(db, document_id)
-    cards = _create_document_flashcards(db, document, version, count)
-    if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
+    """Shared flow of the four generation routes.
+
+    Browser forms are always answered with a page: success goes to the content
+    bank with a count, failure back to the dashboard with a readable message and
+    a Retry button. API clients (no text/html Accept) keep the JSON responses."""
+    wants_html = "text/html" in request.headers.get("accept", "")
+    model = Flashcard if kind == "flashcards" else GeneratedQuestion
+    singular, plural = GENERATION_LABELS[kind]
+    token = request_token if _REQUEST_TOKEN_RE.fullmatch(request_token or "") else None
+
+    if token is not None:
+        existing = db.query(model).filter(model.generation_request_id == token).order_by(model.id).all()
+        if existing:  # the same form was submitted again after it already succeeded
+            document = db.get(Document, existing[0].source_document_id)
+            if wants_html:
+                return RedirectResponse(
+                    url=f"/admin/content?document_id={document.id}&notice=saved&generated={len(existing)}"
+                        f"&generated_kind={kind}&repeat=1",
+                    status_code=303,
+                )
+            return JSONResponse({"status": "already_saved", "generated": len(existing),
+                                 "ids": [item.id for item in existing]})
+        with _generations_lock:
+            busy = token in _generations_in_progress
+            if not busy:
+                _generations_in_progress.add(token)
+        if busy:
+            detail = "This generation request is already running. Its result will appear in the content bank."
+            if not wants_html:
+                raise HTTPException(status_code=409, detail=detail)
+            request.session["generation_flash"] = {"kind": "in_progress", "message": detail, "retry": False,
+                                                   "document_id": document_id}
+            return RedirectResponse(url=f"/admin/learning/dashboard#source-document-{document_id}", status_code=303)
+
+    try:
+        document, version = _document_for_generation(db, document_id, module_id)
+        create = _create_document_flashcards if kind == "flashcards" else _create_document_questions
+        items = create(db, document, version, count, token)
+    except HTTPException as exc:
+        if not wants_html:
+            raise
+        failure = _generation_failure(exc, learning_content_ai.provider_display_name())
+        document = db.get(Document, document_id)
+        request.session["generation_flash"] = {
+            **failure,
+            "content_kind": kind,
+            "label": plural,
+            "document_id": document_id,
+            "document_title": document.title if document else "",
+            "count": count,
+            "action_url": action_url,
+        }
+        return RedirectResponse(url=f"/admin/learning/dashboard#source-document-{document_id}", status_code=303)
+    finally:
+        if token is not None:
+            with _generations_lock:
+                _generations_in_progress.discard(token)
+
+    if wants_html:
+        return RedirectResponse(
+            url=f"/admin/content?document_id={document.id}&notice=saved&generated={len(items)}&generated_kind={kind}",
+            status_code=303,
+        )
     passages = _version_passages(version)
-    return JSONResponse({
-        "status": "saved",
-        "generated": len(cards),
-        "provider": cards[0].ai_provider if cards else None,
-        "model": cards[0].ai_model if cards else None,
-        "flashcards": [
+    if kind == "flashcards":
+        listed = [
             {
                 "id": card.id,
                 "front": card.front,
@@ -2598,29 +3084,10 @@ def admin_generate_flashcards(
                 "lifecycle": _content_status(card)["key"],
                 "source": _content_provenance(card, passages),
             }
-            for card in cards
-        ],
-    })
-
-
-@app.post("/admin/learning/documents/{document_id}/generate/questions")
-def admin_generate_questions(
-    document_id: int,
-    request: Request,
-    count: int = Form(6),
-    db: Session = Depends(get_db),
-):
-    document, version = _document_for_generation(db, document_id)
-    questions = _create_document_questions(db, document, version, count)
-    if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
-    passages = _version_passages(version)
-    return JSONResponse({
-        "status": "saved",
-        "generated": len(questions),
-        "provider": questions[0].ai_provider if questions else None,
-        "model": questions[0].ai_model if questions else None,
-        "questions": [
+            for card in items
+        ]
+    else:
+        listed = [
             {
                 "id": item.id,
                 "question_text": item.question_text,
@@ -2629,9 +3096,41 @@ def admin_generate_questions(
                 "lifecycle": _content_status(item)["key"],
                 "source": _content_provenance(item, passages),
             }
-            for item in questions
-        ],
+            for item in items
+        ]
+    return JSONResponse({
+        "status": "saved",
+        "generated": len(items),
+        "provider": items[0].ai_provider if items else None,
+        "model": items[0].ai_model if items else None,
+        kind: listed,
     })
+
+
+@app.post("/admin/learning/documents/{document_id}/generate/flashcards")
+def admin_generate_flashcards(
+    document_id: int,
+    request: Request,
+    count: int = Form(10),
+    request_token: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    return _run_generation(request, db, kind="flashcards", document_id=document_id, module_id=None, count=count,
+                           request_token=request_token,
+                           action_url=f"/admin/learning/documents/{document_id}/generate/flashcards")
+
+
+@app.post("/admin/learning/documents/{document_id}/generate/questions")
+def admin_generate_questions(
+    document_id: int,
+    request: Request,
+    count: int = Form(6),
+    request_token: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    return _run_generation(request, db, kind="questions", document_id=document_id, module_id=None, count=count,
+                           request_token=request_token,
+                           action_url=f"/admin/learning/documents/{document_id}/generate/questions")
 
 
 @app.post("/admin/learning/modules/{module_id}/generate/flashcards")
@@ -2640,21 +3139,12 @@ def admin_generate_module_flashcards(
     request: Request,
     document_id: int = Form(...),
     count: int = Form(10),
+    request_token: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    document, version = _document_for_generation(db, document_id, module_id)
-    cards = _create_document_flashcards(db, document, version, count)
-    if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
-    passages = _version_passages(version)
-    return JSONResponse({
-        "status": "saved",
-        "generated": len(cards),
-        "flashcards": [
-            {"id": card.id, "front": card.front, "source": _content_provenance(card, passages)}
-            for card in cards
-        ],
-    })
+    return _run_generation(request, db, kind="flashcards", document_id=document_id, module_id=module_id, count=count,
+                           request_token=request_token,
+                           action_url=f"/admin/learning/modules/{module_id}/generate/flashcards")
 
 
 @app.post("/admin/learning/modules/{module_id}/generate/questions")
@@ -2663,21 +3153,12 @@ def admin_generate_module_questions(
     request: Request,
     document_id: int = Form(...),
     count: int = Form(6),
+    request_token: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    document, version = _document_for_generation(db, document_id, module_id)
-    questions = _create_document_questions(db, document, version, count)
-    if "text/html" in request.headers.get("accept", ""):
-        return RedirectResponse(url=f"/admin/content?document_id={document.id}&notice=saved", status_code=303)
-    passages = _version_passages(version)
-    return JSONResponse({
-        "status": "saved",
-        "generated": len(questions),
-        "questions": [
-            {"id": item.id, "question_text": item.question_text, "source": _content_provenance(item, passages)}
-            for item in questions
-        ],
-    })
+    return _run_generation(request, db, kind="questions", document_id=document_id, module_id=module_id, count=count,
+                           request_token=request_token,
+                           action_url=f"/admin/learning/modules/{module_id}/generate/questions")
 
 
 @app.post("/student/enrollments")
@@ -4861,17 +5342,1052 @@ def create_quiz_submit(
         auto_advance=auto_advance,
         status="Draft",
         created_at=datetime.now(timezone.utc),
+        time_limit_seconds=qb.MAX_QUIZ_TOTAL_SECONDS,  # 10-minute rule for new quizzes
     )
     db.add(quiz)
     db.commit()
     return RedirectResponse(url="/admin?success=created", status_code=303)
 
 
+# ===========================================================================
+# Phase 4 — teacher-authored question banks and quiz assembly.
+#
+# Everything here is under /admin, so the existing auth middleware is the
+# gate. Bank answer keys, explanations and marking guidance are only ever
+# rendered on these teacher pages; when a bank question is added to a quiz
+# it becomes an ordinary Question snapshot (no explanation, no source text),
+# which is all the student pages ever read.
+# ===========================================================================
+
+QUESTION_BANK_NOTICES = {
+    "uploaded": "Document extracted. Review every question below, then confirm the import.",
+    "saved": "Your review changes were saved. The import is not confirmed yet.",
+    "confirmed": "Import confirmed. Ready questions in this bank can now be used to build quizzes.",
+    "question_saved": "Question saved.",
+    "question_deleted": "Question removed from the bank. Quizzes that already use it are unchanged.",
+    "question_restored": "Question restored.",
+    "archived": "Bank archived. It can no longer be chosen for new quizzes; existing quizzes are unchanged.",
+    "restored": "Bank restored.",
+    "deleted": "Bank moved to Recently deleted. Existing quizzes are unchanged.",
+    "purged": "Bank permanently deleted.",
+    "discarded": "The pending import was discarded.",
+    "updated": "Bank details updated.",
+    "replacement_pending": "A replacement for this bank is already waiting for review.",
+}
+BANK_QUESTION_STATUS = {
+    "READY": ("Ready", "text-bg-success"),
+    "NEEDS_REVIEW": ("Needs review", "text-bg-warning"),
+    "EXCLUDED": ("Excluded", "text-bg-secondary"),
+}
+DEFAULT_TIMING_EXAMPLES = {"mcq_single": 20, "mcq_multiple": 40, "true_false": 15, "short_answer": 90}
+
+templates.env.filters["minsec"] = qb.format_minutes_seconds
+
+
+def _bank_or_404(db: Session, bank_id: int) -> QuestionBank:
+    bank = db.get(QuestionBank, bank_id)
+    if bank is None:
+        raise HTTPException(status_code=404, detail="Question bank not found.")
+    return bank
+
+
+def _bank_question_or_404(db: Session, bank: QuestionBank, question_id: int) -> BankQuestion:
+    question = db.get(BankQuestion, question_id)
+    if question is None or question.question_bank_id != bank.id:
+        raise HTTPException(status_code=404, detail="Question not found in this bank.")
+    return question
+
+
+def _bank_status(bank: QuestionBank) -> dict:
+    if bank.deleted_at is not None:
+        return {"key": "deleted", "label": "Deleted", "badge": "text-bg-dark"}
+    if bank.status == "DRAFT":
+        label = "Replacement awaiting review" if bank.supersedes_id else "Import awaiting review"
+        return {"key": "draft", "label": label, "badge": "text-bg-warning"}
+    if not bank.is_current:
+        return {"key": "superseded", "label": f"Replaced (v{bank.version_number})", "badge": "text-bg-secondary"}
+    if bank.archived_at is not None:
+        return {"key": "archived", "label": "Archived", "badge": "text-bg-secondary"}
+    return {"key": "active", "label": "Active", "badge": "text-bg-success"}
+
+
+def _bank_usage(db: Session, bank_question_ids: list[int]) -> dict[int, set[int]]:
+    """bank question id -> ids of quizzes that contain a copy of it."""
+    usage: dict[int, set[int]] = {}
+    if not bank_question_ids:
+        return usage
+    rows = db.query(Question.bank_question_id, Question.quiz_id).filter(
+        Question.bank_question_id.in_(bank_question_ids)).all()
+    for bank_question_id, quiz_id in rows:
+        usage.setdefault(bank_question_id, set()).add(quiz_id)
+    return usage
+
+
+def _bank_summary(db: Session, bank: QuestionBank) -> dict:
+    live = [q for q in bank.questions if q.deleted_at is None]
+    usage = _bank_usage(db, [q.id for q in live])
+    counted = [q for q in live if q.status != "EXCLUDED"]
+    types: dict[str, int] = {}
+    for question in counted:
+        types[question.question_type] = types.get(question.question_type, 0) + 1
+    with_key = sum(1 for q in counted if q.answer_key_raw or q.status == "READY")
+    return {
+        "bank": bank,
+        "status": _bank_status(bank),
+        "total": len(counted),
+        "ready": sum(1 for q in counted if q.status == "READY"),
+        "needs_review": sum(1 for q in counted if q.status == "NEEDS_REVIEW"),
+        "excluded": sum(1 for q in live if q.status == "EXCLUDED"),
+        "types": types,
+        "answer_key_complete": with_key == len(counted) and bool(counted),
+        "with_key": with_key,
+        "used_questions": sum(1 for q in live if usage.get(q.id)),
+        "used_quizzes": len(set().union(*usage.values())) if usage else 0,
+    }
+
+
+def _passage_lookup(bank: QuestionBank) -> dict[str, list[dict]]:
+    lookup: dict[str, list[dict]] = {}
+    for passage in qb.loads(bank.source_passages, []):
+        for pid in [passage.get("id")] + list(passage.get("cell_ids") or []):
+            if pid and passage not in lookup.setdefault(pid, []):
+                lookup[pid].append(passage)
+    return lookup
+
+
+def _passages_for(lookup: dict[str, list[dict]], ids: list[str]) -> list[dict]:
+    seen, result = set(), []
+    for pid in ids:
+        for passage in lookup.get(pid, []):
+            key = id(passage)
+            if key not in seen:
+                seen.add(key)
+                result.append(passage)
+    return result
+
+
+def _bank_question_errors(question: BankQuestion) -> list[str]:
+    return qb.validate_question(
+        question.question_type, question.question_text, qb.loads(question.options, []),
+        qb.loads(question.correct_answer, None), question.explanation or "", question.marking_guidance or "",
+    )
+
+
+def _bank_question_view(question: BankQuestion, lookup: dict[str, list[dict]], usage: dict[int, set[int]]) -> dict:
+    options = qb.loads(question.options, [])
+    labels = qb.loads(question.option_labels, [])
+    correct = qb.loads(question.correct_answer, None)
+    original = qb.loads(question.original_snapshot, {})
+    current = {
+        "question_text": question.question_text, "question_type": question.question_type,
+        "options": options, "correct_answer": correct, "explanation": question.explanation,
+        "marking_guidance": question.marking_guidance,
+    }
+    edited = any(original.get(key) != value for key, value in current.items()) if original else False
+    if question.question_type in ("mcq_single", "mcq_multiple"):
+        correct_set = {correct} if isinstance(correct, str) else set(correct or [])
+        correct_indexes = [i for i, option in enumerate(options) if option in correct_set]
+    else:
+        correct_indexes = []
+    label_list = [labels[i] if i < len(labels) and labels[i] else chr(65 + i) for i in range(len(options))]
+    slots = max(4, len(options) + 2) if question.question_type in ("mcq_single", "mcq_multiple") else max(4, len(options))
+    slots = min(qb.MAX_OPTIONS, slots)
+    return {
+        "q": question,
+        "options": options,
+        "labels": label_list,
+        "option_slots": [
+            {"index": i, "label": label_list[i] if i < len(label_list) else chr(65 + i),
+             "text": options[i] if i < len(options) else ""}
+            for i in range(slots)
+        ],
+        "correct": correct,
+        "correct_indexes": correct_indexes,
+        "expected_answers": "\n".join(correct) if question.question_type == "short_answer" and isinstance(correct, list) else "",
+        "warnings": qb.loads(question.warnings, []),
+        "errors": _bank_question_errors(question),
+        "status_label": BANK_QUESTION_STATUS.get(question.status, (question.status, "text-bg-light")),
+        "source_passages": _passages_for(lookup, qb.loads(question.source_passage_ids, [])),
+        "answer_passages": _passages_for(lookup, qb.loads(question.answer_passage_ids, [])),
+        "original": original,
+        "edited": edited,
+        "used_in": sorted(usage.get(question.id, set())),
+    }
+
+
+def _form_text(form, key: str) -> str:
+    value = form.get(key)
+    if value is None:
+        return ""
+    # Browsers submit textarea line breaks as CRLF; store the document's own "\n".
+    return str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _apply_bank_question_form(question: BankQuestion, form) -> None:
+    """Apply one question's fields from the review/edit form and re-evaluate it."""
+    prefix = f"q{question.id}_"
+    question_type = form.get(prefix + "type") or question.question_type
+    if question_type not in qb.QUESTION_TYPES:
+        question_type = question.question_type
+    text = _form_text(form, prefix + "text")
+    indexed: list[tuple[int, str, str]] = []
+    for i in range(qb.MAX_OPTIONS):
+        value = _form_text(form, f"{prefix}opt_{i}")
+        if value:
+            label = _form_text(form, f"{prefix}label_{i}")[:8] or chr(65 + i)
+            indexed.append((i, label, value))
+    by_index = {i: value for i, _, value in indexed}
+    options = [value for _, _, value in indexed]
+    labels = [label for _, label, _ in indexed]
+    correct: object = None
+    if question_type == "mcq_single":
+        chosen = form.get(prefix + "correct")
+        correct = by_index.get(int(chosen)) if chosen and str(chosen).isdigit() else None
+    elif question_type == "mcq_multiple":
+        chosen = [int(c) for c in form.getlist(prefix + "correct_multi") if str(c).isdigit()]
+        correct = [by_index[i] for i in sorted(set(chosen)) if i in by_index]
+    elif question_type == "true_false":
+        value = form.get(prefix + "tf")
+        correct = value if value in ("True", "False") else None
+        options, labels = ["True", "False"], []
+    else:
+        correct = [line.strip() for line in _form_text(form, prefix + "expected").split("\n") if line.strip()]
+        options, labels = [], []
+
+    question.question_text = text
+    question.question_type = question_type
+    question.options = json.dumps(options, ensure_ascii=False)
+    question.option_labels = json.dumps(labels, ensure_ascii=False)
+    question.correct_answer = json.dumps(correct, ensure_ascii=False)
+    question.explanation = _form_text(form, prefix + "explanation")
+    question.marking_guidance = _form_text(form, prefix + "guidance")
+    question.teacher_reviewed = form.get(prefix + "reviewed") == "yes"
+    question.status = qb.question_status(
+        _bank_question_errors(question), qb.loads(question.warnings, []),
+        question.teacher_reviewed, form.get(prefix + "exclude") == "yes",
+    )
+    question.updated_at = datetime.now(timezone.utc)
+
+
+def _bank_form_choices(db: Session) -> dict:
+    courses = db.query(Course).filter(Course.deleted_at.is_(None)).order_by(Course.name).all()
+    modules = (db.query(LearningModule).join(Course, Course.id == LearningModule.course_id)
+               .filter(Course.deleted_at.is_(None)).order_by(Course.name, LearningModule.title).all())
+    return {"courses": courses, "modules": modules}
+
+
+def _resolve_course_module(db: Session, course_id: str | int | None, module_id: str | int | None) -> tuple[int | None, int | None]:
+    """module_id may be a module id, or "c<id>" for a whole course (one placement dropdown)."""
+    raw_module = str(module_id or "").strip()
+    if raw_module.startswith("c") and raw_module[1:].isdigit():
+        course_id, module_id = raw_module[1:], None
+    module = db.get(LearningModule, int(module_id)) if module_id and str(module_id).isdigit() else None
+    if module is not None:
+        return module.course_id, module.id
+    course = db.get(Course, int(course_id)) if course_id and str(course_id).isdigit() else None
+    return (course.id if course else None), None
+
+
+def _bank_redirect(bank_id: int | None = None, notice: str | None = None, error: str | None = None,
+                   path: str = "") -> RedirectResponse:
+    from urllib.parse import urlencode
+    base = f"/admin/question-banks/{bank_id}{path}" if bank_id else "/admin/question-banks"
+    params = {key: value for key, value in (("notice", notice), ("error", error)) if value}
+    return RedirectResponse(url=base + ("?" + urlencode(params) if params else ""), status_code=303)
+
+
+@app.get("/admin/question-banks")
+def question_banks_page(
+    request: Request,
+    status: str = "active",
+    course_id: str = "",
+    q: str = "",
+    notice: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+):
+    course_id = _optional_id(course_id)
+    banks = db.query(QuestionBank).order_by(QuestionBank.created_at.desc()).all()
+    search = q.strip().casefold()
+    rows, counts = [], {"active": 0, "draft": 0, "archived": 0, "deleted": 0, "all": 0}
+    for bank in banks:
+        state = _bank_status(bank)["key"]
+        if state == "superseded":
+            continue  # old versions are listed on their current bank's page
+        counts[state] = counts.get(state, 0) + 1
+        counts["all"] += 1
+        if status != "all" and state != status:
+            continue
+        if course_id and bank.course_id != course_id:
+            continue
+        if search and search not in f"{bank.title} {bank.source_filename}".casefold():
+            continue
+        rows.append(_bank_summary(db, bank))
+    return templates.TemplateResponse(
+        request=request,
+        name="question_banks.html",
+        context={
+            "app_name": settings.APP_NAME,
+            "active_page": "question-banks",
+            "rows": rows,
+            "counts": counts,
+            "filters": {"status": status, "course_id": course_id, "q": q},
+            "notice": QUESTION_BANK_NOTICES.get(notice or ""),
+            "error_message": error,
+            "type_labels": QUESTION_TYPES,
+            **_bank_form_choices(db),
+        },
+    )
+
+
+@app.post("/admin/question-banks/upload")
+def question_bank_upload(
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    course_id: str = Form(""),
+    module_id: str = Form(""),
+    replaces_bank_id: str = Form(""),
+    allow_duplicate: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    replaced = None
+    if replaces_bank_id.strip().isdigit():
+        replaced = _bank_or_404(db, int(replaces_bank_id))
+        if replaced.status != "ACTIVE" or not replaced.is_current or replaced.deleted_at is not None:
+            return _bank_redirect(replaced.id, error="Only the current version of an active bank can be replaced.")
+        pending = db.query(QuestionBank).filter(
+            QuestionBank.lineage_id == replaced.lineage_id, QuestionBank.status == "DRAFT").first()
+        if pending is not None:
+            return _bank_redirect(pending.id, notice="replacement_pending", path="/import")
+    back = (lambda message: _bank_redirect(replaced.id, error=message, path="/replace")) if replaced \
+        else (lambda message: _bank_redirect(error=message))
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in qb.SUPPORTED_EXTENSIONS:
+        return back("Upload a Word (.docx) or PowerPoint (.pptx) question document.")
+    validated_path, error = _validate_document_upload(file)
+    if error:
+        return back(error)
+    destination = QUESTION_BANK_UPLOADS_DIR / validated_path.name
+    sha256, _ = _save_uploaded_document(file, destination=destination)
+
+    duplicate = db.query(QuestionBank).filter(QuestionBank.sha256 == sha256, QuestionBank.deleted_at.is_(None)).first()
+    if duplicate is not None and (replaced is not None and duplicate.lineage_id == replaced.lineage_id
+                                  or allow_duplicate != "yes"):
+        destination.unlink(missing_ok=True)
+        return back(
+            f"This exact file was already imported as \"{duplicate.title}\" (v{duplicate.version_number}). "
+            + ("" if replaced else "Tick \"Import anyway\" to create a separate bank from the same file.")
+        )
+
+    try:
+        result = qb.import_document(destination, file.filename or destination.name)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError):
+        destination.unlink(missing_ok=True)
+        return back("The document could not be read. Check that it is a valid, unprotected Word or PowerPoint file.")
+    if not result.questions:
+        destination.unlink(missing_ok=True)
+        return back("No numbered questions were recognised in this document. Number each question "
+                    "(1., 2., ...) and label options A., B., C., D.")
+
+    resolved_course, resolved_module = _resolve_course_module(db, course_id, module_id)
+    if replaced is not None and not course_id and not module_id:
+        resolved_course, resolved_module = replaced.course_id, replaced.module_id
+    version_number = 1
+    if replaced is not None:
+        version_number = (db.query(func.max(QuestionBank.version_number))
+                          .filter(QuestionBank.lineage_id == replaced.lineage_id).scalar() or 0) + 1
+    bank = QuestionBank(
+        title=(title.strip() or (replaced.title if replaced else "") or result.suggested_title
+               or Path(file.filename or "Question bank").stem)[:200],
+        course_id=resolved_course,
+        module_id=resolved_module,
+        source_filename=Path(file.filename or destination.name).name[:255],
+        storage_filename=destination.name,
+        file_extension=suffix,
+        mime_type=DOCUMENT_MIME_TYPES[suffix],
+        file_size_bytes=destination.stat().st_size,
+        sha256=sha256,
+        status="DRAFT",
+        lineage_id=replaced.lineage_id if replaced else None,
+        version_number=version_number,
+        supersedes_id=replaced.id if replaced else None,
+        is_current=False,
+        source_passages=json.dumps(result.passages, ensure_ascii=False),
+        import_warnings=json.dumps(result.warnings, ensure_ascii=False),
+        preamble=json.dumps(result.preamble, ensure_ascii=False),
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(bank)
+    db.flush()
+    if bank.lineage_id is None:
+        bank.lineage_id = bank.id
+    for item in result.questions:
+        question = BankQuestion(
+            question_bank_id=bank.id,
+            position=item.position,
+            question_number=item.question_number,
+            question_text=item.question_text,
+            question_type=item.question_type,
+            options=json.dumps(item.options, ensure_ascii=False),
+            option_labels=json.dumps(item.option_labels, ensure_ascii=False),
+            correct_answer=json.dumps(item.correct_answer, ensure_ascii=False),
+            answer_key_raw=item.answer_key_raw,
+            explanation=item.explanation,
+            marking_guidance=item.marking_guidance,
+            source_reference=qb.source_reference(item.source_passage_ids, item.answer_passage_ids),
+            source_passage_id=item.source_passage_ids[0] if item.source_passage_ids else None,
+            source_passage_ids=json.dumps(item.source_passage_ids),
+            answer_passage_ids=json.dumps(item.answer_passage_ids),
+            warnings=json.dumps(item.warnings, ensure_ascii=False),
+            original_snapshot=json.dumps(item.original_snapshot(), ensure_ascii=False),
+        )
+        question.status = qb.question_status(_bank_question_errors(question), item.warnings, False, False)
+        db.add(question)
+    db.commit()
+    return _bank_redirect(bank.id, notice="uploaded", path="/import")
+
+
+def _bank_detail_context(db: Session, bank: QuestionBank, **extra) -> dict:
+    lookup = _passage_lookup(bank)
+    live = [q for q in bank.questions if q.deleted_at is None]
+    usage = _bank_usage(db, [q.id for q in bank.questions])
+    versions = (db.query(QuestionBank).filter(QuestionBank.lineage_id == bank.lineage_id)
+                .order_by(QuestionBank.version_number.desc()).all())
+    return {
+        "app_name": settings.APP_NAME,
+        "active_page": "question-banks",
+        "bank": bank,
+        "summary": _bank_summary(db, bank),
+        "views": [_bank_question_view(q, lookup, usage) for q in live],
+        "deleted_views": [_bank_question_view(q, lookup, usage) for q in bank.questions if q.deleted_at is not None],
+        "bank_warnings": qb.loads(bank.import_warnings, []),
+        "preamble": qb.loads(bank.preamble, []),
+        "versions": versions,
+        "type_labels": QUESTION_TYPES,
+        **_bank_form_choices(db),
+        **extra,
+    }
+
+
+@app.get("/admin/question-banks/{bank_id}")
+def question_bank_detail(
+    request: Request,
+    bank_id: int,
+    q: str = "",
+    question_type: str = "",
+    state: str = "",
+    notice: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+):
+    bank = _bank_or_404(db, bank_id)
+    if bank.status == "DRAFT":
+        return RedirectResponse(url=f"/admin/question-banks/{bank.id}/import", status_code=303)
+    context = _bank_detail_context(db, bank, notice=QUESTION_BANK_NOTICES.get(notice or ""), error_message=error,
+                                   filters={"q": q, "question_type": question_type, "state": state})
+    search = q.strip().casefold()
+    context["views"] = [
+        view for view in context["views"]
+        if (not search or search in (view["q"].question_text + " " + " ".join(view["options"])).casefold())
+        and (not question_type or view["q"].question_type == question_type)
+        and (not state or view["q"].status == state)
+    ]
+    return templates.TemplateResponse(request=request, name="question_bank_detail.html", context=context)
+
+
+@app.get("/admin/question-banks/{bank_id}/import")
+def question_bank_import_page(
+    request: Request, bank_id: int, notice: str | None = None, error: str | None = None,
+    db: Session = Depends(get_db),
+):
+    bank = _bank_or_404(db, bank_id)
+    if bank.status != "DRAFT":
+        return RedirectResponse(url=f"/admin/question-banks/{bank.id}", status_code=303)
+    replaced = db.get(QuestionBank, bank.supersedes_id) if bank.supersedes_id else None
+    context = _bank_detail_context(db, bank, notice=QUESTION_BANK_NOTICES.get(notice or ""),
+                                   error_message=error, replaced=replaced)
+    return templates.TemplateResponse(request=request, name="question_bank_import.html", context=context)
+
+
+@app.post("/admin/question-banks/{bank_id}/import")
+async def question_bank_import_submit(request: Request, bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    if bank.status != "DRAFT":
+        return RedirectResponse(url=f"/admin/question-banks/{bank.id}", status_code=303)
+    form = await request.form()
+    title = _form_text(form, "bank_title")
+    if title:
+        bank.title = title[:200]
+    if "module_id" in form or "course_id" in form:
+        bank.course_id, bank.module_id = _resolve_course_module(db, form.get("course_id"), form.get("module_id"))
+    for question in bank.questions:
+        if f"q{question.id}_type" in form:
+            _apply_bank_question_form(question, form)
+    if form.get("action") != "confirm":
+        db.commit()
+        return _bank_redirect(bank.id, notice="saved", path="/import")
+    if not any(q.status == "READY" for q in bank.questions):
+        db.commit()
+        return _bank_redirect(bank.id, path="/import",
+                              error="No question is ready yet. Complete or correct at least one question before confirming.")
+    now = datetime.now(timezone.utc)
+    if bank.supersedes_id:
+        previous = db.get(QuestionBank, bank.supersedes_id)
+        if previous is not None and previous.is_current:
+            previous.is_current = False
+            previous.superseded_at = now
+    bank.status = "ACTIVE"
+    bank.is_current = True
+    bank.confirmed_at = now
+    db.commit()
+    return _bank_redirect(bank.id, notice="confirmed")
+
+
+@app.post("/admin/question-banks/{bank_id}/discard")
+def question_bank_discard(bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    if bank.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="Only an unconfirmed import can be discarded.")
+    (QUESTION_BANK_UPLOADS_DIR / bank.storage_filename).unlink(missing_ok=True)
+    replaced_id = bank.supersedes_id
+    db.delete(bank)
+    db.commit()
+    return _bank_redirect(replaced_id, notice="discarded")
+
+
+@app.post("/admin/question-banks/{bank_id}/edit")
+def question_bank_edit(
+    bank_id: int,
+    title: str = Form(...),
+    description: str = Form(""),
+    course_id: str = Form(""),
+    module_id: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    bank = _bank_or_404(db, bank_id)
+    if not title.strip():
+        return _bank_redirect(bank.id, error="A bank name is required.")
+    bank.title = title.strip()[:200]
+    bank.description = description.strip()
+    bank.course_id, bank.module_id = _resolve_course_module(db, course_id, module_id)
+    db.commit()
+    return _bank_redirect(bank.id, notice="updated")
+
+
+@app.get("/admin/question-banks/{bank_id}/questions/{question_id}/edit")
+def bank_question_edit_page(request: Request, bank_id: int, question_id: int, error: str | None = None,
+                            db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    question = _bank_question_or_404(db, bank, question_id)
+    if not bank.is_current and bank.status == "ACTIVE":
+        raise HTTPException(status_code=409, detail="Replaced bank versions are kept read-only for history.")
+    view = _bank_question_view(question, _passage_lookup(bank), _bank_usage(db, [question.id]))
+    return templates.TemplateResponse(
+        request=request,
+        name="question_bank_question_edit.html",
+        context={"app_name": settings.APP_NAME, "active_page": "question-banks", "bank": bank, "view": view,
+                 "type_labels": QUESTION_TYPES, "error_message": error},
+    )
+
+
+@app.post("/admin/question-banks/{bank_id}/questions/{question_id}/edit")
+async def bank_question_edit_submit(request: Request, bank_id: int, question_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    question = _bank_question_or_404(db, bank, question_id)
+    if not bank.is_current and bank.status == "ACTIVE":
+        raise HTTPException(status_code=409, detail="Replaced bank versions are kept read-only for history.")
+    form = await request.form()
+    _apply_bank_question_form(question, form)
+    # Quiz questions copied from this entry are independent snapshots and
+    # past responses keep their own snapshots: this never changes a quiz.
+    db.commit()
+    if bank.status == "DRAFT":
+        return _bank_redirect(bank.id, notice="saved", path="/import")
+    return _bank_redirect(bank.id, notice="question_saved")
+
+
+@app.get("/admin/question-banks/{bank_id}/questions/{question_id}/delete")
+def bank_question_delete_page(request: Request, bank_id: int, question_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    question = _bank_question_or_404(db, bank, question_id)
+    used = _bank_usage(db, [question.id]).get(question.id, set())
+    return _confirm_page(
+        request,
+        active_page="question-banks",
+        title="Remove question",
+        heading="Remove this question from the bank?",
+        item_summary=question.question_text[:300],
+        consequences=[
+            "It will no longer be offered when building new quizzes.",
+            (f"It is already used in {len(used)} quiz(zes). Those quizzes keep their own copy and their "
+             "results are not changed." if used else "It is not used in any quiz."),
+            "You can restore it later from this bank's Removed questions list.",
+        ],
+        action_url=f"/admin/question-banks/{bank.id}/questions/{question.id}/delete",
+        cancel_url=f"/admin/question-banks/{bank.id}",
+        button_label="Remove question",
+    )
+
+
+@app.post("/admin/question-banks/{bank_id}/questions/{question_id}/delete")
+def bank_question_delete(bank_id: int, question_id: int, confirm: str = Form(""), db: Session = Depends(get_db)):
+    _require_confirmation(confirm)
+    bank = _bank_or_404(db, bank_id)
+    question = _bank_question_or_404(db, bank, question_id)
+    question.deleted_at = datetime.now(timezone.utc)  # soft delete: provenance links stay valid
+    db.commit()
+    return _bank_redirect(bank.id, notice="question_deleted")
+
+
+@app.post("/admin/question-banks/{bank_id}/questions/{question_id}/restore")
+def bank_question_restore(bank_id: int, question_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    question = _bank_question_or_404(db, bank, question_id)
+    question.deleted_at = None
+    db.commit()
+    return _bank_redirect(bank.id, notice="question_restored")
+
+
+@app.get("/admin/question-banks/{bank_id}/replace")
+def question_bank_replace_page(request: Request, bank_id: int, error: str | None = None, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    return templates.TemplateResponse(
+        request=request,
+        name="question_bank_replace.html",
+        context={"app_name": settings.APP_NAME, "active_page": "question-banks", "bank": bank,
+                 "summary": _bank_summary(db, bank), "error_message": error},
+    )
+
+
+@app.post("/admin/question-banks/{bank_id}/archive")
+def question_bank_archive(bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    if bank.status != "ACTIVE" or bank.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="Only an active bank can be archived.")
+    bank.archived_at = datetime.now(timezone.utc)
+    db.commit()
+    return _bank_redirect(bank.id, notice="archived")
+
+
+@app.post("/admin/question-banks/{bank_id}/restore")
+def question_bank_restore(bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    notice = "restored"
+    if bank.deleted_at is not None:
+        bank.deleted_at = None
+    else:
+        bank.archived_at = None
+    db.commit()
+    return _bank_redirect(bank.id, notice=notice)
+
+
+def _bank_purge_blockers(db: Session, bank: QuestionBank) -> list[str]:
+    blockers = []
+    question_ids = [q.id for q in bank.questions]
+    conditions = [Question.question_bank_id == bank.id]
+    if question_ids:
+        conditions.append(Question.bank_question_id.in_(question_ids))
+    used = db.query(Question.quiz_id).filter(or_(*conditions)).distinct().count()
+    if used:
+        blockers.append(f"{used} quiz(zes) contain questions copied from this bank. Their provenance and "
+                        "history must be kept, so the bank can only be archived or moved to Recently deleted.")
+    return blockers
+
+
+@app.get("/admin/question-banks/{bank_id}/delete")
+def question_bank_delete_page(request: Request, bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    summary = _bank_summary(db, bank)
+    return _confirm_page(
+        request,
+        active_page="question-banks",
+        title="Delete question bank",
+        heading=f"Move \"{bank.title}\" to Recently deleted?",
+        item_summary=f"{bank.title} · {bank.source_filename} · {summary['total']} question(s)",
+        consequences=[
+            "It will no longer be offered when building new quizzes.",
+            (f"{summary['used_quizzes']} existing quiz(zes) use its questions. They keep their own copies "
+             "and their results are not changed." if summary["used_quizzes"] else "No quiz uses its questions."),
+            "You can restore it from Recently deleted, or delete it permanently when no quiz uses it.",
+        ],
+        action_url=f"/admin/question-banks/{bank.id}/delete",
+        cancel_url=f"/admin/question-banks/{bank.id}",
+        button_label="Move to Recently deleted",
+    )
+
+
+@app.post("/admin/question-banks/{bank_id}/delete")
+def question_bank_delete(bank_id: int, confirm: str = Form(""), db: Session = Depends(get_db)):
+    _require_confirmation(confirm)
+    bank = _bank_or_404(db, bank_id)
+    bank.deleted_at = datetime.now(timezone.utc)
+    db.commit()
+    return _bank_redirect(notice="deleted")
+
+
+@app.get("/admin/question-banks/{bank_id}/purge")
+def question_bank_purge_page(request: Request, bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    return _confirm_page(
+        request,
+        active_page="question-banks",
+        title="Delete permanently",
+        heading=f"Permanently delete \"{bank.title}\" (v{bank.version_number})?",
+        item_summary=f"{bank.title} · {bank.source_filename}",
+        consequences=["The bank, its questions, answer key and stored source file are removed.",
+                      "This cannot be undone."],
+        blockers=_bank_purge_blockers(db, bank) + (
+            [] if bank.deleted_at is not None else ["Move the bank to Recently deleted first."]),
+        action_url=f"/admin/question-banks/{bank.id}/purge",
+        cancel_url=f"/admin/question-banks/{bank.id}",
+        button_label="Delete permanently",
+    )
+
+
+@app.post("/admin/question-banks/{bank_id}/purge")
+def question_bank_purge(bank_id: int, confirm: str = Form(""), db: Session = Depends(get_db)):
+    _require_confirmation(confirm)
+    bank = _bank_or_404(db, bank_id)
+    if bank.deleted_at is None:
+        raise HTTPException(status_code=409, detail="Move the bank to Recently deleted first.")
+    blockers = _bank_purge_blockers(db, bank)
+    if blockers:
+        raise HTTPException(status_code=409, detail=blockers[0])
+    db.query(QuestionBank).filter(QuestionBank.supersedes_id == bank.id).update({"supersedes_id": None})
+    (QUESTION_BANK_UPLOADS_DIR / bank.storage_filename).unlink(missing_ok=True)
+    db.delete(bank)
+    db.commit()
+    return _bank_redirect(notice="purged")
+
+
+@app.get("/admin/question-banks/{bank_id}/answer-key")
+def question_bank_answer_key(request: Request, bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    context = _bank_detail_context(db, bank)
+    return templates.TemplateResponse(request=request, name="question_bank_answer_key.html", context=context)
+
+
+@app.get("/admin/question-banks/{bank_id}/source")
+def question_bank_source(request: Request, bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    used_ids: dict[str, list[str]] = {}
+    for question in bank.questions:
+        label = f"Q{question.question_number or question.position}"
+        for pid in qb.loads(question.source_passage_ids, []) + qb.loads(question.answer_passage_ids, []):
+            used_ids.setdefault(pid, []).append(label)
+    return templates.TemplateResponse(
+        request=request,
+        name="question_bank_source.html",
+        context={"app_name": settings.APP_NAME, "active_page": "question-banks", "bank": bank,
+                 "passages": qb.loads(bank.source_passages, []), "used_ids": used_ids,
+                 "preamble": qb.loads(bank.preamble, [])},
+    )
+
+
+@app.get("/admin/question-banks/{bank_id}/file")
+def question_bank_file(bank_id: int, db: Session = Depends(get_db)):
+    bank = _bank_or_404(db, bank_id)
+    path = (QUESTION_BANK_UPLOADS_DIR / bank.storage_filename).resolve()
+    if path.parent != QUESTION_BANK_UPLOADS_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="The stored source file is not available.")
+    return FileResponse(path, media_type=bank.mime_type, filename=bank.source_filename)
+
+
+# ------------------------------------------------- quiz assembly from banks --
+
+def _eligible_bank_questions(db: Session, bank_ids: list[int]) -> list[BankQuestion]:
+    """READY questions from active, current, non-archived banks, in bank order."""
+    if not bank_ids:
+        return []
+    return (
+        db.query(BankQuestion)
+        .join(QuestionBank, QuestionBank.id == BankQuestion.question_bank_id)
+        .filter(
+            QuestionBank.id.in_(bank_ids),
+            QuestionBank.status == "ACTIVE",
+            QuestionBank.is_current.is_(True),
+            QuestionBank.archived_at.is_(None),
+            QuestionBank.deleted_at.is_(None),
+            BankQuestion.status == "READY",
+            BankQuestion.deleted_at.is_(None),
+        )
+        .order_by(QuestionBank.created_at, QuestionBank.id, BankQuestion.position, BankQuestion.id)
+        .all()
+    )
+
+
+def _dedupe_pool(questions: list[BankQuestion]) -> tuple[list[BankQuestion], int]:
+    """Drop questions whose wording and options repeat one already in the pool."""
+    seen, unique, dropped = set(), [], 0
+    for question in questions:
+        identity = qb.normalised_identity(question.question_text, qb.loads(question.options, []))
+        if identity in seen:
+            dropped += 1
+            continue
+        seen.add(identity)
+        unique.append(question)
+    return unique, dropped
+
+
+def _assembly_banks(db: Session, course_id: int | None) -> list[dict]:
+    query = db.query(QuestionBank).filter(
+        QuestionBank.status == "ACTIVE", QuestionBank.is_current.is_(True),
+        QuestionBank.archived_at.is_(None), QuestionBank.deleted_at.is_(None),
+    )
+    if course_id:
+        query = query.filter(QuestionBank.course_id == course_id)
+    return [_bank_summary(db, bank) for bank in query.order_by(QuestionBank.created_at, QuestionBank.id).all()]
+
+
+def _int_list(values) -> list[int]:
+    return [int(v) for v in values if str(v).strip().isdigit()]
+
+
+def _assembly_settings(form) -> dict:
+    timings, timing_errors = {}, []
+    for question_type, example in DEFAULT_TIMING_EXAMPLES.items():
+        seconds, error = qb.parse_minutes_seconds(form.get(f"time_{question_type}_min", example // 60),
+                                                  form.get(f"time_{question_type}_sec", example % 60))
+        if error:
+            timing_errors.append(f"{QUESTION_TYPES[question_type]} starting time: {error}")
+        timings[question_type] = seconds or example
+    passing = form.get("passing_percentage", "60")
+    return {
+        "title": _form_text(form, "title"),
+        "description": _form_text(form, "description"),
+        "passing_percentage": int(passing) if str(passing).isdigit() and 0 <= int(passing) <= 100 else 60,
+        "auto_advance": form.get("auto_advance") in ("true", "on", "yes", "1"),
+        "bank_ids": _int_list(form.getlist("bank_ids")),
+        "mode": form.get("mode") if form.get("mode") in ("random", "all") else "random",
+        "count": form.get("count", ""),
+        "shuffle_order": form.get("shuffle_order") in ("true", "on", "yes", "1"),
+        "shuffle_options": form.get("shuffle_options") in ("true", "on", "yes", "1"),
+        "timings": timings,
+        "timing_errors": timing_errors,
+        "course_id": int(form.get("course_id")) if str(form.get("course_id") or "").isdigit() else None,
+    }
+
+
+def _assemble_page(request: Request, db: Session, settings_values: dict, error: str | None = None):
+    choices = _bank_form_choices(db)
+    return templates.TemplateResponse(
+        request=request,
+        name="quiz_assemble.html",
+        context={
+            "app_name": settings.APP_NAME,
+            "active_page": "quizzes",
+            "banks": _assembly_banks(db, settings_values.get("course_id")),
+            "courses": choices["courses"],
+            "values": settings_values,
+            "error_message": error,
+            "type_labels": QUESTION_TYPES,
+            "max_total": qb.MAX_QUIZ_TOTAL_SECONDS,
+        },
+        status_code=400 if error else 200,
+    )
+
+
+def _preview_item(question: BankQuestion, order: list[int], seconds: int, included: bool) -> dict:
+    options = qb.loads(question.options, [])
+    correct = qb.loads(question.correct_answer, None)
+    shown = qb.apply_permutation(options, order) if len(order) == len(options) else options
+    correct_set = {correct} if isinstance(correct, str) else set(correct or [])
+    return {
+        "q": question,
+        "bank": question.bank,
+        "options": shown,
+        "correct_flags": [option in correct_set for option in shown],
+        "correct": correct,
+        "order": ",".join(map(str, order)),
+        "minutes": seconds // 60,
+        "seconds": seconds % 60,
+        "total_seconds": seconds,
+        "included": included,
+    }
+
+
+def _assemble_preview_page(request: Request, db: Session, values: dict, selected: list[dict],
+                           pool_rest: list[dict], error: str | None = None, info: list[str] | None = None):
+    durations = [item["total_seconds"] for item in selected]
+    return templates.TemplateResponse(
+        request=request,
+        name="quiz_assemble_preview.html",
+        context={
+            "app_name": settings.APP_NAME,
+            "active_page": "quizzes",
+            "values": values,
+            "selected": selected,
+            "pool_rest": pool_rest,
+            "total_seconds": sum(durations),
+            "time_error": qb.total_time_error(durations),
+            "max_total": qb.MAX_QUIZ_TOTAL_SECONDS,
+            "error_message": error,
+            "info": info or [],
+            "type_labels": QUESTION_TYPES,
+            "bank_titles": {b.id: b.title for b in db.query(QuestionBank).filter(QuestionBank.id.in_(values["bank_ids"])).all()} if values["bank_ids"] else {},
+        },
+        status_code=400 if error else 200,
+    )
+
+
+@app.get("/admin/quizzes/assemble")
+def quiz_assemble_page(request: Request, course_id: str = "", db: Session = Depends(get_db)):
+    course_id = _optional_id(course_id)
+    values = {"title": "", "description": "", "passing_percentage": 60, "auto_advance": False, "bank_ids": [],
+              "mode": "random", "count": "", "shuffle_order": True, "shuffle_options": False,
+              "timings": dict(DEFAULT_TIMING_EXAMPLES), "course_id": course_id}
+    return _assemble_page(request, db, values)
+
+
+@app.post("/admin/quizzes/assemble/preview")
+async def quiz_assemble_preview(request: Request, db: Session = Depends(get_db)):
+    form = await request.form()
+    values = _assembly_settings(form)
+    if not values["title"]:
+        return _assemble_page(request, db, values, "Enter a quiz title.")
+    if not values["bank_ids"]:
+        return _assemble_page(request, db, values, "Select at least one question bank.")
+    if values["timing_errors"]:
+        return _assemble_page(request, db, values, " ".join(values["timing_errors"]))
+    eligible = _eligible_bank_questions(db, values["bank_ids"])
+    pool, dropped = _dedupe_pool(eligible)
+    if not pool:
+        return _assemble_page(request, db, values, "The selected banks have no ready questions.")
+    count = int(values["count"]) if str(values["count"]).strip().isdigit() else None
+    try:
+        chosen_ids = qb.select_questions([q.id for q in pool], count, values["mode"], values["shuffle_order"])
+    except ValueError as exc:
+        return _assemble_page(request, db, values, str(exc))
+    by_id = {q.id: q for q in pool}
+
+    def item(question: BankQuestion, included: bool) -> dict:
+        order = qb.option_permutation(len(qb.loads(question.options, [])),
+                                      values["shuffle_options"] and question.question_type in ("mcq_single", "mcq_multiple"))
+        return _preview_item(question, order, values["timings"][question.question_type], included)
+
+    selected = [item(by_id[qid], True) for qid in chosen_ids]
+    rest = [item(q, False) for q in pool if q.id not in set(chosen_ids)]
+    info = []
+    if dropped:
+        info.append(f"{dropped} question(s) appear in more than one selected bank with identical wording; "
+                    "each is offered only once.")
+    not_ready = (db.query(BankQuestion).filter(BankQuestion.question_bank_id.in_(values["bank_ids"]),
+                                               BankQuestion.status == "NEEDS_REVIEW",
+                                               BankQuestion.deleted_at.is_(None)).count())
+    if not_ready:
+        info.append(f"{not_ready} question(s) in these banks still need review and are not offered.")
+    return _assemble_preview_page(request, db, values, selected, rest, info=info)
+
+
+@app.post("/admin/quizzes/assemble/save")
+async def quiz_assemble_save(request: Request, db: Session = Depends(get_db)):
+    form = await request.form()
+    values = _assembly_settings(form)
+    posted = _int_list(form.getlist("item"))
+    included_ids = [qid for qid in posted if form.get(f"include_{qid}") == "yes"]
+    eligible = {q.id: q for q in _eligible_bank_questions(db, values["bank_ids"])}
+
+    errors: list[str] = []
+    selected, rest, durations = [], [], []
+    identities = set()
+    if len(set(posted)) != len(posted):
+        errors.append("The same question was submitted twice.")
+    for qid in dict.fromkeys(posted):
+        question = eligible.get(qid)
+        if question is None:
+            errors.append(f"Question #{qid} is no longer available (it may have been edited, removed or archived).")
+            continue
+        options = qb.loads(question.options, [])
+        order = qb.parse_permutation(form.get(f"order_{qid}", ""), len(options)) or list(range(len(options)))
+        seconds, timing_error = qb.parse_minutes_seconds(form.get(f"min_{qid}"), form.get(f"sec_{qid}"))
+        included = qid in included_ids
+        if included and timing_error:
+            errors.append(f"Question {len(selected) + 1}: {timing_error}")
+        entry = _preview_item(question, order, seconds or values["timings"][question.question_type], included)
+        if included:
+            identity = qb.normalised_identity(question.question_text, options)
+            if identity in identities:
+                errors.append(f"Question {len(selected) + 1} repeats another selected question.")
+            identities.add(identity)
+            selected.append(entry)
+            durations.append(entry["total_seconds"])
+        else:
+            rest.append(entry)
+    if not values["title"]:
+        errors.append("Enter a quiz title.")
+    if not selected:
+        errors.append("Include at least one question.")
+    if errors:
+        return _assemble_preview_page(request, db, values, selected, rest, error=" ".join(errors))
+
+    total = sum(durations)
+    quiz = Quiz(
+        title=values["title"][:200],
+        description=values["description"],
+        duration_minutes=max(1, -(-total // 60)),   # summary figure only; timers are per question
+        time_limit_seconds=qb.MAX_QUIZ_TOTAL_SECONDS,
+        passing_percentage=values["passing_percentage"],
+        auto_advance=values["auto_advance"],
+        status="Draft",
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(quiz)
+    db.flush()
+    # Inserted in the chosen order: Quiz.questions is ordered by Question.id,
+    # which is how the live session engine numbers questions.
+    for entry in selected:
+        question: BankQuestion = entry["q"]
+        bank = question.bank
+        db.add(Question(
+            quiz_id=quiz.id,
+            question_text=question.question_text,
+            question_type=question.question_type,
+            points=1,
+            duration_seconds=entry["total_seconds"],
+            options=json.dumps(entry["options"], ensure_ascii=False),
+            # Answers are stored as option text, so a new option order never
+            # changes which option is correct.
+            correct_answer=question.correct_answer,
+            created_at=datetime.now(timezone.utc),
+            grading_notes=(question.marking_guidance or None) if question.question_type == "short_answer" else None,
+            bank_question_id=question.id,
+            question_bank_id=bank.id,
+            source_reference=f"{bank.source_filename} · {question.source_reference}"[:255],
+            source_passage_id=question.source_passage_id,
+        ))
+    db.commit()
+    return RedirectResponse(url=f"/admin/quizzes/{quiz.id}?success=assembled", status_code=303)
+
+
+def _quiz_uses_question_banks(quiz: Quiz) -> bool:
+    return any(q.bank_question_id is not None or q.question_bank_id is not None for q in quiz.questions)
+
+
+def _quiz_time_limit(quiz: Quiz) -> int | None:
+    """Total-time cap for this quiz, or None.
+
+    New quizzes store 600 s. Quizzes created before the rule (NULL) keep their
+    original behaviour: capped only if they contain question-bank questions."""
+    if quiz.time_limit_seconds:
+        return quiz.time_limit_seconds
+    return qb.MAX_QUIZ_TOTAL_SECONDS if _quiz_uses_question_banks(quiz) else None
+
+
+def _quiz_time_limit_error(quiz: Quiz) -> str | None:
+    """Checked when publishing and when starting a session; drafts may exceed it."""
+    limit = _quiz_time_limit(quiz)
+    if limit is None:
+        return None
+    return qb.total_time_error([q.duration_seconds for q in quiz.questions], limit)
+
+
 # ------------------------------------------------------- quiz: question builder --
 
 @app.get("/admin/quizzes/{quiz_id}")
 def quiz_builder_page(
-    quiz_id: int, request: Request, success: str | None = None, db: Session = Depends(get_db)
+    quiz_id: int, request: Request, success: str | None = None, error: str | None = None,
+    db: Session = Depends(get_db),
 ):
     """The Question Builder: quiz summary + Preview/Publish/Back actions +
     the list of questions belonging to this quiz, plus this quiz's
@@ -4908,6 +6424,12 @@ def quiz_builder_page(
             "success_message": SUCCESS_MESSAGES.get(success),
             "past_sessions": past_sessions,
             "session_student_counts": session_student_counts,
+            "error_message": error,
+            "total_seconds": sum(q.duration_seconds for q in quiz.questions),
+            "uses_question_banks": _quiz_uses_question_banks(quiz),
+            "time_limit_error": _quiz_time_limit_error(quiz),
+            "time_limit": _quiz_time_limit(quiz),
+            "max_total": _quiz_time_limit(quiz) or qb.MAX_QUIZ_TOTAL_SECONDS,
         },
     )
 
@@ -4919,6 +6441,10 @@ def publish_quiz(quiz_id: int, db: Session = Depends(get_db)):
     its lifecycle is driven from the Live Sessions page instead."""
     quiz = _get_quiz_or_404(db, quiz_id)
     if quiz.status == "Draft":
+        limit_error = _quiz_time_limit_error(quiz)
+        if limit_error:
+            from urllib.parse import quote
+            return RedirectResponse(url=f"/admin/quizzes/{quiz_id}?error={quote(limit_error)}", status_code=303)
         quiz.status = "Published"
         success = "published"
     elif quiz.status == "Published":
@@ -5002,8 +6528,14 @@ def create_question_page(quiz_id: int, request: Request, error: str | None = Non
                 "option_a": "", "option_b": "", "option_c": "", "option_d": "",
                 "correct_single": "", "correct_flags": {"A": False, "B": False, "C": False, "D": False},
                 "correct_true_false": "True", "accepted_answers": "", "grading_notes": "",
-                "duration_seconds": 600,
+                # A 10-minute quiz cannot spend it all on one question by default.
+                "duration_seconds": 60 if _quiz_time_limit(quiz) else 600,
             },
+            "time_limit": _quiz_time_limit(quiz),
+            "remaining_seconds": (
+                _quiz_time_limit(quiz) - sum(q.duration_seconds for q in quiz.questions)
+                if _quiz_time_limit(quiz) else None
+            ),
         },
     )
 
@@ -5015,6 +6547,8 @@ def create_question_submit(
     question_type: str = Form(...),
     points: int = Form(1),
     duration_seconds: str = Form("600"),
+    duration_min_part: str = Form(""),
+    duration_sec_part: str = Form(""),
     option_a: str = Form(""), option_b: str = Form(""),
     option_c: str = Form(""), option_d: str = Form(""),
     correct_single: str = Form(""),
@@ -5028,7 +6562,8 @@ def create_question_submit(
 ):
     quiz = _get_quiz_or_404(db, quiz_id)
 
-    validated_duration, duration_error = _validate_question_duration(duration_seconds)
+    validated_duration, duration_error = _validate_question_duration(
+        _combine_duration_parts(duration_seconds, duration_min_part, duration_sec_part))
     if duration_error:
         return RedirectResponse(
             url=f"/admin/quizzes/{quiz_id}/questions/new?error={duration_error}", status_code=303
@@ -5091,6 +6626,8 @@ def edit_question_submit(
     question_type: str = Form(...),
     points: int = Form(1),
     duration_seconds: str = Form("600"),
+    duration_min_part: str = Form(""),
+    duration_sec_part: str = Form(""),
     option_a: str = Form(""), option_b: str = Form(""),
     option_c: str = Form(""), option_d: str = Form(""),
     correct_single: str = Form(""),
@@ -5103,8 +6640,16 @@ def edit_question_submit(
     db: Session = Depends(get_db),
 ):
     question = _get_question_or_404(db, quiz_id, question_id)
+    if question.question_type in ("mcq_single", "mcq_multiple") and len(json.loads(question.options or "[]")) > len(OPTION_LETTERS):
+        # The manual editor has four option slots; saving would silently drop options.
+        return RedirectResponse(
+            url=f"/admin/quizzes/{quiz_id}/questions/{question_id}/edit?error=This+question+has+more+than+four+options.+"
+                "Edit+it+in+its+question+bank+and+add+it+to+a+new+quiz+instead.",
+            status_code=303,
+        )
 
-    validated_duration, duration_error = _validate_question_duration(duration_seconds)
+    validated_duration, duration_error = _validate_question_duration(
+        _combine_duration_parts(duration_seconds, duration_min_part, duration_sec_part))
     if duration_error:
         return RedirectResponse(
             url=f"/admin/quizzes/{quiz_id}/questions/{question_id}/edit?error={duration_error}",
@@ -5151,7 +6696,14 @@ def duplicate_question(quiz_id: int, question_id: int, db: Session = Depends(get
         source_document_version_id=original.source_document_version_id,
         source_reference=original.source_reference,
         source_passage_id=original.source_passage_id,
+        bank_question_id=original.bank_question_id,
+        question_bank_id=original.question_bank_id,
     )
+    if original.bank_question_id is not None:
+        # Keep the bank question's own timer (and marking guidance) so a
+        # duplicate does not silently jump to the 600-second default.
+        copy.duration_seconds = original.duration_seconds
+        copy.grading_notes = original.grading_notes
     db.add(copy)
     db.commit()
     return RedirectResponse(url=f"/admin/quizzes/{quiz_id}?success=question_duplicated", status_code=303)
@@ -5161,6 +6713,19 @@ def duplicate_question(quiz_id: int, question_id: int, db: Session = Depends(get
 def question_provenance(quiz_id: int, question_id: int, db: Session = Depends(get_db)):
     """Where a quiz question came from: its generated question, document, version and passage."""
     question = _get_question_or_404(db, quiz_id, question_id)
+    if question.bank_question_id is not None or question.question_bank_id is not None:
+        bank = question.question_bank
+        return JSONResponse({
+            "question_id": question.id,
+            "origin": "question_bank",
+            "question_bank_id": question.question_bank_id,
+            "bank_question_id": question.bank_question_id,
+            "bank_title": bank.title if bank else None,
+            "bank_version_number": bank.version_number if bank else None,
+            "source_filename": bank.source_filename if bank else None,
+            "source_reference": question.source_reference,
+            "passage_id": question.source_passage_id,
+        })
     if question.generated_question_id is None and question.source_document_id is None:
         return JSONResponse({"question_id": question.id, "origin": "manual", "source": None})
     return JSONResponse({
@@ -5752,6 +7317,11 @@ def start_session(quiz_id: int, db: Session = Depends(get_db)):
     if _session_phase(quiz, None) != "PUBLISHED":
         # already Live, or not yet Published — nothing to do
         return RedirectResponse(url="/admin/sessions", status_code=303)
+    limit_error = _quiz_time_limit_error(quiz)
+    if limit_error:
+        # A published bank-assembled quiz whose timers were lengthened later.
+        from urllib.parse import quote
+        return RedirectResponse(url=f"/admin/quizzes/{quiz_id}?error={quote(limit_error)}", status_code=303)
 
     session = LiveSession(
         quiz_id=quiz.id,

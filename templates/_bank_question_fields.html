@@ -1,0 +1,135 @@
+{#
+  Teacher-only review/edit fields for one bank question (Phase 4).
+  Used by the import preview and the single-question edit page. Answer
+  keys and explanations appear here because these are /admin pages.
+#}
+{% macro question_fields(view, type_labels) %}
+{% set q = view.q %}
+{% set p = "q" ~ q.id ~ "_" %}
+<div class="sq-card p-3 p-md-4 mb-3" data-bq="{{ q.id }}" data-bq-status="{{ q.status }}">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <div class="d-flex flex-wrap align-items-center gap-2">
+      <span class="fw-bold">Question {{ q.question_number or q.position }}</span>
+      <span class="badge {{ view.status_label[1] }}" data-status-label>{{ view.status_label[0] }}</span>
+      {% if view.edited %}<span class="badge text-bg-info">Edited by teacher</span>{% endif %}
+      {% if view.used_in %}<span class="badge text-bg-light">Used in {{ view.used_in|length }} quiz(zes)</span>{% endif %}
+    </div>
+    <span class="sq-note">Source: {{ q.source_reference or "—" }}</span>
+  </div>
+
+  {% if view.errors or view.warnings %}
+  <div class="mb-3" data-bq-problems>
+    {% for message in view.errors %}<div class="small" style="color: var(--sq-rose-hi);"><i class="bi bi-x-octagon me-1"></i>{{ message }}</div>{% endfor %}
+    {% for message in view.warnings %}<div class="small" style="color: var(--sq-amber);"><i class="bi bi-exclamation-triangle me-1"></i>{{ message }}</div>{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="row g-3">
+    <div class="col-lg-7">
+      <div class="mb-3">
+        <label class="form-label" for="{{ p }}type">Question type</label>
+        <select class="form-select" id="{{ p }}type" name="{{ p }}type" data-type-select>
+          {% for value, label in type_labels.items() %}<option value="{{ value }}" {% if q.question_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="mb-3">
+        <label class="form-label" for="{{ p }}text">Question wording</label>
+        <textarea class="form-control" id="{{ p }}text" name="{{ p }}text" rows="3" dir="auto">{{ q.question_text }}</textarea>
+      </div>
+
+      <fieldset class="mb-3" data-show-for="mcq_single mcq_multiple">
+        <legend class="form-label mb-1">Options <span class="sq-note">(tick the correct answer)</span></legend>
+        {% for slot in view.option_slots %}
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <input type="radio" class="form-check-input mt-0" name="{{ p }}correct" value="{{ slot.index }}"
+                 aria-label="Option {{ slot.label }} is the correct answer" data-show-for="mcq_single"
+                 {% if slot.index in view.correct_indexes and q.question_type == "mcq_single" %}checked{% endif %}>
+          <input type="checkbox" class="form-check-input mt-0" name="{{ p }}correct_multi" value="{{ slot.index }}"
+                 aria-label="Option {{ slot.label }} is correct" data-show-for="mcq_multiple"
+                 {% if slot.index in view.correct_indexes and q.question_type == "mcq_multiple" %}checked{% endif %}>
+          <input type="text" class="form-control form-control-sm text-center" style="max-width:3.2rem;" name="{{ p }}label_{{ slot.index }}"
+                 value="{{ slot.label }}" aria-label="Option label">
+          <input type="text" class="form-control form-control-sm" name="{{ p }}opt_{{ slot.index }}" value="{{ slot.text }}"
+                 dir="auto" aria-label="Option {{ slot.label }} wording" placeholder="(empty — not used)">
+        </div>
+        {% endfor %}
+      </fieldset>
+
+      <div class="mb-3" data-show-for="true_false">
+        <label class="form-label" for="{{ p }}tf">Correct answer</label>
+        <select class="form-select" id="{{ p }}tf" name="{{ p }}tf">
+          <option value="" {% if view.correct not in ["True", "False"] %}selected{% endif %}>— choose —</option>
+          <option value="True" {% if view.correct == "True" %}selected{% endif %}>True</option>
+          <option value="False" {% if view.correct == "False" %}selected{% endif %}>False</option>
+        </select>
+      </div>
+
+      <div data-show-for="short_answer">
+        <div class="mb-3">
+          <label class="form-label" for="{{ p }}expected">Expected answer(s) <span class="sq-note">one per line</span></label>
+          <textarea class="form-control" id="{{ p }}expected" name="{{ p }}expected" rows="2" dir="auto">{{ view.expected_answers }}</textarea>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="{{ p }}guidance">Marking guidance</label>
+          <textarea class="form-control" id="{{ p }}guidance" name="{{ p }}guidance" rows="2" dir="auto">{{ q.marking_guidance }}</textarea>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label" for="{{ p }}explanation">Explanation
+          <span class="sq-note" data-show-for="short_answer">(required for short answer)</span>
+          <span class="sq-note" data-show-for="mcq_single mcq_multiple true_false">(optional)</span></label>
+        <textarea class="form-control" id="{{ p }}explanation" name="{{ p }}explanation" rows="2" dir="auto">{{ q.explanation }}</textarea>
+      </div>
+
+      <div class="d-flex flex-wrap gap-3">
+        {% if view.warnings %}
+        <label class="form-check-label small"><input class="form-check-input me-1" type="checkbox" name="{{ p }}reviewed" value="yes" {% if q.teacher_reviewed %}checked{% endif %}>
+          I have checked this question against the original</label>
+        {% endif %}
+        <label class="form-check-label small"><input class="form-check-input me-1" type="checkbox" name="{{ p }}exclude" value="yes" {% if q.status == "EXCLUDED" %}checked{% endif %}>
+          Exclude this question</label>
+      </div>
+    </div>
+
+    <div class="col-lg-5">
+      <details class="small" open>
+        <summary class="sq-note mb-2">Original document text</summary>
+        {% for passage in view.source_passages %}
+        <div class="mb-2 p-2" style="background: rgba(255,255,255,0.04); border-radius: 8px;">
+          <div class="sq-note">{{ passage.label }}</div>
+          <div style="white-space: pre-wrap;" dir="auto">{{ passage.text }}</div>
+        </div>
+        {% else %}<p class="sq-note">No source passage recorded.</p>{% endfor %}
+        <div class="sq-note mt-2">Answer key{% if view.q.answer_key_raw %}: <strong style="color: var(--sq-text);">{{ view.q.answer_key_raw }}</strong>{% else %}: not found{% endif %}</div>
+        {% for passage in view.answer_passages %}
+        <div class="mb-2 p-2" style="background: rgba(255,255,255,0.04); border-radius: 8px;">
+          <div class="sq-note">{{ passage.label }}</div>
+          <div style="white-space: pre-wrap;" dir="auto">{{ passage.text }}</div>
+        </div>
+        {% endfor %}
+      </details>
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro type_toggle_script() %}
+<script>
+  (function () {
+    function apply(card) {
+      var select = card.querySelector('[data-type-select]');
+      if (!select) return;
+      card.querySelectorAll('[data-show-for]').forEach(function (el) {
+        var show = el.getAttribute('data-show-for').split(' ').indexOf(select.value) !== -1;
+        el.style.display = show ? '' : 'none';
+      });
+    }
+    document.querySelectorAll('[data-bq]').forEach(function (card) {
+      apply(card);
+      var select = card.querySelector('[data-type-select]');
+      if (select) select.addEventListener('change', function () { apply(card); });
+    });
+  })();
+</script>
+{% endmacro %}

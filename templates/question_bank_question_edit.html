@@ -1,0 +1,19 @@
+{% extends "dashboard_base.html" %}
+{% from "_bank_question_fields.html" import question_fields, type_toggle_script %}
+{% block title %}Edit bank question · {{ app_name }}{% endblock %}
+{% block page_title %}Edit Bank Question{% endblock %}
+
+{% block content %}
+<a href="/admin/question-banks/{{ bank.id }}{% if bank.status == 'DRAFT' %}/import{% endif %}" class="sq-note"><i class="bi bi-arrow-left me-1"></i>{{ bank.title }}</a>
+<h1 class="h4 mt-2 mb-2">Edit question</h1>
+<p class="sq-note">Changes apply to this bank only. Quizzes that already contain this question keep their own copy, and past results are never changed.</p>
+{% if error_message %}<div class="alert alert-danger" role="alert">{{ error_message }}</div>{% endif %}
+<form method="post" action="/admin/question-banks/{{ bank.id }}/questions/{{ view.q.id }}/edit">
+  {{ question_fields(view, type_labels) }}
+  <div class="d-flex gap-2">
+    <button class="btn btn-sq btn-sq-primary" type="submit">Save question</button>
+    <a class="btn btn-sq btn-sq-outline" href="/admin/question-banks/{{ bank.id }}">Cancel</a>
+  </div>
+</form>
+{{ type_toggle_script() }}
+{% endblock %}

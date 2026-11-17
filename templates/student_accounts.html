@@ -18,6 +18,8 @@
     <span data-copy-status></span>
   </p>
 
+  {% if notice %}<div class="alert alert-info" role="status" data-account-notice>{{ notice }}</div>{% endif %}
+
   <section class="sq-card p-4 mb-4">
     <h2 class="h5">Create account</h2>
     <p class="text-secondary">A temporary password is shown once after account creation.</p>
@@ -41,7 +43,7 @@
   </section>
 
   <form method="get" action="/admin/student-accounts" class="input-group mb-3">
-    <input class="form-control" name="q" value="{{ search }}" placeholder="Search name, username, or student code">
+    <input class="form-control" type="search" name="q" value="{{ search }}" placeholder="Search name, username, or student code" aria-label="Search student accounts" autocomplete="off" data-clear-search>
     <button class="btn btn-sq btn-sq-outline" type="submit">Search</button>
   </form>
 
@@ -91,6 +93,8 @@
         </select>
         <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Assign</button>
       </form>
+      <a class="btn btn-sm btn-outline-danger ms-auto" href="/admin/student-accounts/{{ account.id }}/delete" data-delete-account
+         aria-label="Delete account of {{ account.full_name }}"><i class="bi bi-trash me-1" aria-hidden="true"></i>Delete account…</a>
     </div>
     {% set active_assignments = assignments_by_account.get(account.id, []) %}
     {% if active_assignments %}
@@ -116,6 +120,27 @@
   {% else %}
   <p class="text-secondary">No student accounts found.</p>
   {% endfor %}
+
+  {% if deleted_accounts %}
+  <details class="sq-card p-4 mt-4" data-deleted-accounts>
+    <summary class="fw-semibold">Deleted accounts ({{ deleted_accounts|length }})</summary>
+    <p class="small text-secondary mt-2">These accounts cannot log in. Their quiz results and review history are kept.</p>
+    <ul class="list-unstyled mb-0">
+      {% for account in deleted_accounts %}
+      <li class="d-flex flex-wrap justify-content-between align-items-center gap-2 py-2 border-top" data-deleted-account="{{ account.id }}">
+        <span>{{ account.full_name }} <span class="text-secondary">· {{ account.username }} · {{ account.student_code }}</span>
+          <span class="badge {% if account.anonymized_at %}text-bg-dark{% else %}text-bg-secondary{% endif %}">{{ "Anonymised" if account.anonymized_at else "Deleted" }}</span>
+          <span class="small text-secondary">{{ account.deleted_at.strftime("%Y-%m-%d %H:%M") }}</span></span>
+        {% if not account.anonymized_at %}
+        <form method="post" action="/admin/student-accounts/{{ account.id }}/restore">
+          <button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Restore account</button>
+        </form>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
 </div>
 {% endblock %}
 

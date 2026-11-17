@@ -219,6 +219,10 @@ def _run_migrations() -> None:
 
         if "quizzes" in tables:
             quiz_cols = _existing_columns(conn, "quizzes")
+            if "time_limit_seconds" not in quiz_cols:
+                # Existing quizzes stay NULL (no new cap): published quizzes
+                # and historical sessions keep behaving exactly as before.
+                conn.execute(text("ALTER TABLE quizzes ADD COLUMN time_limit_seconds INTEGER"))
             if "auto_advance" not in quiz_cols:
                 conn.execute(text("ALTER TABLE quizzes ADD COLUMN auto_advance BOOLEAN DEFAULT 0"))
 
@@ -246,7 +250,17 @@ def _run_migrations() -> None:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN source_reference VARCHAR(255)"))
             if "source_passage_id" not in question_cols:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN source_passage_id VARCHAR(40)"))
-            for column in ("generated_question_id", "source_document_id", "source_document_version_id"):
+            # Phase 4 question-bank provenance: nullable and additive.
+            if "bank_question_id" not in question_cols:
+                conn.execute(text(
+                    "ALTER TABLE questions ADD COLUMN bank_question_id INTEGER REFERENCES bank_questions(id)"
+                ))
+            if "question_bank_id" not in question_cols:
+                conn.execute(text(
+                    "ALTER TABLE questions ADD COLUMN question_bank_id INTEGER REFERENCES question_banks(id)"
+                ))
+            for column in ("generated_question_id", "source_document_id", "source_document_version_id",
+                           "bank_question_id", "question_bank_id"):
                 conn.execute(text(
                     f"CREATE INDEX IF NOT EXISTS ix_questions_{column} ON questions({column})"
                 ))
@@ -309,6 +323,14 @@ def _run_migrations() -> None:
                 conn.execute(text(
                     "ALTER TABLE student_accounts ADD COLUMN locked_until DATETIME"
                 ))
+            # Phase 4A: soft deletion / anonymisation of student accounts.
+            for column in ("deleted_at", "anonymized_at"):
+                if column not in account_cols:
+                    conn.execute(text(f"ALTER TABLE student_accounts ADD COLUMN {column} DATETIME"))
+
+        # Phase 4A: soft deletion of source documents ("Recently deleted").
+        if "documents" in tables and "deleted_at" not in _existing_columns(conn, "documents"):
+            conn.execute(text("ALTER TABLE documents ADD COLUMN deleted_at DATETIME"))
 
         if "learning_modules" in tables:
             module_cols = _existing_columns(conn, "learning_modules")
@@ -361,6 +383,12 @@ def _run_migrations() -> None:
             for column in ("assigned_at", "published_at", "archived_at", "deleted_at"):
                 if column not in content_cols:
                     conn.execute(text(f"ALTER TABLE {content_table} ADD COLUMN {column} DATETIME"))
+            if "generation_request_id" not in content_cols:  # Phase 4A idempotency token
+                conn.execute(text(f"ALTER TABLE {content_table} ADD COLUMN generation_request_id VARCHAR(64)"))
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_{content_table}_generation_request_id "
+                f"ON {content_table}(generation_request_id)"
+            ))
             conn.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_{content_table}_course_id ON {content_table}(course_id)"
             ))

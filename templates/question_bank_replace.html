@@ -1,0 +1,23 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Replace bank · {{ app_name }}{% endblock %}
+{% block page_title %}Replace Question Bank{% endblock %}
+
+{% block content %}
+<a href="/admin/question-banks/{{ bank.id }}" class="sq-note"><i class="bi bi-arrow-left me-1"></i>{{ bank.title }}</a>
+<h1 class="h4 mt-2 mb-3">Replace “{{ bank.title }}” (currently v{{ bank.version_number }})</h1>
+{% if error_message %}<div class="alert alert-danger" role="alert" data-error>{{ error_message }}</div>{% endif %}
+<section class="sq-card p-3 p-md-4 mb-3">
+  <ul class="mb-0">
+    <li>The new document becomes <strong>version {{ bank.version_number + 1 }}</strong> after you review and confirm it.</li>
+    <li>Version {{ bank.version_number }} is kept read-only for history; it is not overwritten.</li>
+    <li>{% if summary.used_quizzes %}{{ summary.used_quizzes }} quiz(zes) already use questions from this bank. They keep their own copies, and
+      completed sessions and results are not changed.{% else %}No quiz uses this bank yet.{% endif %}</li>
+  </ul>
+</section>
+<form method="post" action="/admin/question-banks/upload" enctype="multipart/form-data" class="sq-card p-3 p-md-4">
+  <input type="hidden" name="replaces_bank_id" value="{{ bank.id }}">
+  <label class="form-label" for="replace-file">New Word or PowerPoint document</label>
+  <input class="form-control mb-3" type="file" id="replace-file" name="file" accept=".docx,.pptx" required>
+  <button class="btn btn-sq btn-sq-primary" type="submit">Upload &amp; review replacement</button>
+</form>
+{% endblock %}

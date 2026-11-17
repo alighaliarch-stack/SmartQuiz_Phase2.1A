@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -32,13 +34,64 @@ SOURCE_MARKER = re.compile(r"(?m)^\[\[SOURCE: ([^\]\r\n]{1,120})\]\]\s*$")
 PASSAGE_LABEL = re.compile(r"^(?P<id>(?:P|PG|S)\d{1,6}) · ")
 QUESTION_TYPES = {"mcq_single", "true_false", "short_answer"}
 
+# Phase 4A: bounded retries for temporary provider failures only.
+# Attempt 1 runs immediately; each delay below allows one more attempt.
+RETRY_DELAYS_SECONDS = (2, 4)
+# No further attempt starts unless it could finish (delay + a full request
+# timeout) inside this budget, so a teacher never waits much over 2 minutes.
+TOTAL_RETRY_BUDGET_SECONDS = 120
+TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
+logger = logging.getLogger("smartquiz.ai_content")
+_sleep = time.sleep          # replaced in tests
+_clock = time.monotonic      # replaced in tests
+
+# Failure categories. Only the TRANSIENT ones are ever retried.
+UNAVAILABLE = "unavailable"      # HTTP 500/502/503 – provider overloaded or down
+RATE_LIMITED = "rate_limited"    # HTTP 429
+TIMEOUT = "timeout"              # HTTP 504 or no answer within the timeout
+NETWORK = "network"              # provider could not be reached
+CONFIGURATION = "configuration"  # API key, permission, provider or model problem
+REQUEST = "request"              # the provider rejected the request itself
+OUTPUT = "output"                # the response did not pass validation
+TRANSIENT_KINDS = {UNAVAILABLE, RATE_LIMITED, TIMEOUT, NETWORK}
+
 
 class ContentGenerationError(Exception):
     """AI generation failed or returned content that did not meet requirements."""
 
-    def __init__(self, message: str, status_code: int = 502):
+    def __init__(self, message: str, status_code: int = 502, *, kind: str = OUTPUT,
+                 provider_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+        self.kind = kind
+        self.provider_code = provider_code
+        self.attempts = 1
+
+    @property
+    def transient(self) -> bool:
+        return self.kind in TRANSIENT_KINDS
+
+
+def provider_display_name() -> str:
+    """Teacher-facing name of the configured provider (no secrets read)."""
+    provider = os.environ.get(
+        "AI_CONTENT_PROVIDER", os.environ.get("AI_GRADING_PROVIDER", "gemini")
+    ).strip().lower()
+    return {"gemini": "Gemini", "anthropic": "Claude"}.get(provider, "The AI provider")
+
+
+def _http_kind(code: int | None, message: str = "") -> str:
+    if code == 429:
+        return RATE_LIMITED
+    if code == 504:
+        return TIMEOUT
+    if code in TRANSIENT_HTTP_CODES:
+        return UNAVAILABLE
+    if code in {401, 403, 404}:
+        return CONFIGURATION  # bad key, no permission, unknown/unsupported model
+    if code == 400 and "api key" in (message or "").casefold():
+        return CONFIGURATION  # Gemini reports an invalid key as 400 INVALID_ARGUMENT
+    return REQUEST
 
 
 @dataclass(frozen=True)
@@ -65,12 +118,14 @@ def _provider_config() -> tuple[str, str, str]:
         )
     else:
         raise ContentGenerationError(
-            f"Unsupported AI content provider {provider!r}; configure gemini or anthropic."
+            f"Unsupported AI content provider {provider!r}; configure gemini or anthropic.",
+            kind=CONFIGURATION,
         )
     if not api_key:
         raise ContentGenerationError(
             f"The API key for the configured AI content provider ({provider}) is not configured.",
             status_code=503,
+            kind=CONFIGURATION,
         )
     return provider, model, api_key
 
@@ -81,11 +136,13 @@ def _source_body(extracted_text: str) -> tuple[str, list[str]]:
         raise ContentGenerationError(
             "The selected document has no extracted text to generate from.",
             status_code=422,
+            kind=REQUEST,
         )
     if len(body) > MAX_SOURCE_CHARACTERS:
         raise ContentGenerationError(
             f"The extracted text exceeds the {MAX_SOURCE_CHARACTERS}-character generation limit; split the source document.",
             status_code=413,
+            kind=REQUEST,
         )
     references = SOURCE_MARKER.findall(body)
     if not references:
@@ -180,7 +237,7 @@ def _call_gemini(prompt: str, model: str, api_key: str) -> str:
         from google import genai
         from google.genai import errors, types
     except ImportError as exc:
-        raise ContentGenerationError("The google-genai package is not installed.") from exc
+        raise ContentGenerationError("The google-genai package is not installed.", kind=CONFIGURATION) from exc
     try:
         client = genai.Client(
             api_key=api_key,
@@ -202,22 +259,27 @@ def _call_gemini(prompt: str, model: str, api_key: str) -> str:
         raise ContentGenerationError(
             f"AI provider request failed ({type(exc).__name__}, HTTP {exc.code}{status}, model {model}): {detail}",
             status_code=504 if exc.code == 504 else 502,
+            kind=_http_kind(exc.code, exc.message or ""),
+            provider_code=exc.code,
         ) from None
     except (httpx.TimeoutException, TimeoutError):
         raise ContentGenerationError(
             f"AI provider request timed out after {REQUEST_TIMEOUT_SECONDS} seconds (model {model}).",
             status_code=504,
+            kind=TIMEOUT,
         ) from None
     except (httpx.TransportError, ConnectionError) as exc:
         raise ContentGenerationError(
-            f"AI provider could not be reached ({type(exc).__name__}); check the network connection."
+            f"AI provider could not be reached ({type(exc).__name__}); check the network connection.",
+            kind=NETWORK,
         ) from None
     except Exception as exc:
         raise ContentGenerationError(
-            f"AI provider request failed ({type(exc).__name__})."
+            f"AI provider request failed ({type(exc).__name__}).",
+            kind=REQUEST,
         ) from None
     if not response.text:
-        raise ContentGenerationError("The AI provider returned an empty response.")
+        raise ContentGenerationError("The AI provider returned an empty response.", kind=OUTPUT)
     return response.text
 
 
@@ -242,12 +304,34 @@ def _call_anthropic(prompt: str, model: str, api_key: str) -> str:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read())
         text = payload["content"][0]["text"]
-    except (urllib.error.URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+    except urllib.error.HTTPError as exc:
+        kind = _http_kind(exc.code)
+        if exc.code == 529:  # Anthropic "overloaded"
+            kind = UNAVAILABLE
         raise ContentGenerationError(
-            f"AI provider request failed ({type(exc).__name__})."
+            f"AI provider request failed (HTTPError, HTTP {exc.code}, model {model}).",
+            status_code=504 if exc.code == 504 else 502,
+            kind=kind,
+            provider_code=exc.code,
+        ) from None
+    except TimeoutError:
+        raise ContentGenerationError(
+            f"AI provider request timed out after {REQUEST_TIMEOUT_SECONDS} seconds (model {model}).",
+            status_code=504,
+            kind=TIMEOUT,
+        ) from None
+    except (urllib.error.URLError, OSError) as exc:
+        raise ContentGenerationError(
+            f"AI provider could not be reached ({type(exc).__name__}); check the network connection.",
+            kind=NETWORK,
+        ) from None
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise ContentGenerationError(
+            f"AI provider request failed ({type(exc).__name__}).",
+            kind=OUTPUT,
         ) from None
     if not isinstance(text, str) or not text.strip():
-        raise ContentGenerationError("The AI provider returned an empty response.")
+        raise ContentGenerationError("The AI provider returned an empty response.", kind=OUTPUT)
     return text
 
 
@@ -255,6 +339,32 @@ def _request_provider(prompt: str, provider: str, model: str, api_key: str) -> s
     if provider == "gemini":
         return _call_gemini(prompt, model, api_key)
     return _call_anthropic(prompt, model, api_key)
+
+
+def _request_with_retries(prompt: str, provider: str, model: str, api_key: str) -> str:
+    """Call the provider, retrying only temporary failures with backoff.
+
+    Nothing is saved by this module, so a retry can never duplicate content:
+    the caller stores a batch only after one attempt fully succeeds and the
+    whole batch passes validation."""
+    started = _clock()
+    attempt = 1
+    while True:
+        try:
+            return _request_provider(prompt, provider, model, api_key)
+        except ContentGenerationError as exc:
+            exc.attempts = attempt
+            if not exc.transient or attempt > len(RETRY_DELAYS_SECONDS):
+                raise
+            delay = RETRY_DELAYS_SECONDS[attempt - 1]
+            if _clock() - started + delay + REQUEST_TIMEOUT_SECONDS > TOTAL_RETRY_BUDGET_SECONDS:
+                raise
+            logger.warning(
+                "AI content request failed (%s, HTTP %s, model %s); retry %d in %ss",
+                exc.kind, exc.provider_code, model, attempt, delay,
+            )
+            _sleep(delay)
+            attempt += 1
 
 
 def _response_items(response_text: str) -> list[dict[str, Any]]:
@@ -299,10 +409,10 @@ def generate_flashcards(
     count: int,
 ) -> GeneratedContent:
     if not 1 <= count <= 30:
-        raise ContentGenerationError("Flashcard count must be between 1 and 30.", status_code=422)
+        raise ContentGenerationError("Flashcard count must be between 1 and 30.", status_code=422, kind=REQUEST)
     prompt, references = _build_prompt("flashcards", extracted_text, document_title, count)
     provider, model, api_key = _provider_config()
-    raw_items = _response_items(_request_provider(prompt, provider, model, api_key))
+    raw_items = _response_items(_request_with_retries(prompt, provider, model, api_key))
     if len(raw_items) != count:
         raise ContentGenerationError(f"The AI returned {len(raw_items)} cards; exactly {count} were requested.")
     items: list[dict[str, Any]] = []
@@ -337,10 +447,11 @@ def generate_questions(
         raise ContentGenerationError(
             "Question count must be between 3 and 30 to include all required question types.",
             status_code=422,
+            kind=REQUEST,
         )
     prompt, references = _build_prompt("quiz questions", extracted_text, document_title, count)
     provider, model, api_key = _provider_config()
-    raw_items = _response_items(_request_provider(prompt, provider, model, api_key))
+    raw_items = _response_items(_request_with_retries(prompt, provider, model, api_key))
     if len(raw_items) != count:
         raise ContentGenerationError(f"The AI returned {len(raw_items)} questions; exactly {count} were requested.")
     items: list[dict[str, Any]] = []

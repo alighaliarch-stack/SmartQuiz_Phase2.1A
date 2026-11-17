@@ -115,7 +115,9 @@ class AutomaticSavingTests(_LifecycleBase):
                                         data={"document_id": self.document_id, "count": "2"},
                                         headers={"Accept": "text/html"}, follow_redirects=False)
         self.assertEqual(response.status_code, 303)
-        self.assertEqual(response.headers["location"], f"/admin/content?document_id={self.document_id}&notice=saved")
+        # Phase 4A: the redirect also carries how many items were generated.
+        self.assertEqual(response.headers["location"],
+                         f"/admin/content?document_id={self.document_id}&notice=saved&generated=2&generated_kind=flashcards")
         page = self.client.get(response.headers["location"])
         self.assertIn("not visible to students", page.text)
 

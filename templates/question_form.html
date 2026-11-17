@@ -39,20 +39,21 @@
                      value="{{ question.points if question else 1 }}">
             </div>
             <div class="col-12 col-sm-4">
-              <label for="duration-seconds" class="form-label">Time Limit</label>
+              <span class="form-label d-block" id="duration-label">Time Limit</span>
               {% set current_duration = prefill.duration_seconds %}
-              {% set presets = [15, 20, 30, 45, 60, 90, 120, 180, 300, 600, 900, 1200] %}
-              <select class="form-select" id="duration-seconds" name="duration_seconds">
-                {% if current_duration not in presets %}
-                <option value="{{ current_duration }}" selected>{{ current_duration }} sec (current)</option>
-                {% endif %}
-                {% for s in presets %}
-                <option value="{{ s }}" {% if s == current_duration %}selected{% endif %}>
-                  {{ "%d min"|format(s // 60) if s % 60 == 0 and s >= 60 else "%d sec"|format(s) }}
-                </option>
-                {% endfor %}
-              </select>
+              <div class="d-flex gap-2 align-items-center" role="group" aria-labelledby="duration-label">
+                <input type="number" class="form-control" id="duration-min-part" name="duration_min_part"
+                       min="0" max="20" value="{{ current_duration // 60 }}" aria-label="Minutes" style="max-width:5.5rem;">
+                <span class="sq-note">min</span>
+                <input type="number" class="form-control" id="duration-sec-part" name="duration_sec_part"
+                       min="0" max="59" value="{{ current_duration % 60 }}" aria-label="Seconds" style="max-width:5.5rem;">
+                <span class="sq-note">sec</span>
+              </div>
               <p class="sq-note mt-1 mb-0" style="font-size: 0.76rem;">15 sec – 20 min. Each question keeps its own countdown.</p>
+              {% if time_limit and remaining_seconds is not none %}
+              <p class="sq-note mt-1 mb-0" style="font-size: 0.76rem;" data-time-remaining>
+                This quiz may total {{ time_limit|minsec }}; {{ [remaining_seconds, 0]|max|minsec }} is left for new questions.</p>
+              {% endif %}
             </div>
             <div class="col-12 col-sm-5">
               <label for="question-type" class="form-label">Question Type</label>

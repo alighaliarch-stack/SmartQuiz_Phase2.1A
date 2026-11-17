@@ -1,0 +1,98 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Question banks · {{ app_name }}{% endblock %}
+{% block page_title %}Question Banks{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+  <div>
+    <h1 class="h3 mb-1">Question banks</h1>
+    <p class="sq-note mb-0">Upload your own quiz documents. SmartQuiz keeps your wording, options and answer key exactly as written.</p>
+  </div>
+  <a class="btn btn-sq btn-sq-primary" href="/admin/quizzes/assemble"><i class="bi bi-collection me-2"></i>Create Quiz from Question Banks</a>
+</div>
+
+{% if notice %}<div class="alert alert-info" role="status" data-notice>{{ notice }}</div>{% endif %}
+{% if error_message %}<div class="alert alert-danger" role="alert" data-error>{{ error_message }}</div>{% endif %}
+
+<section class="sq-card p-3 p-md-4 mb-4" aria-labelledby="upload-heading">
+  <h2 class="h5 mb-2" id="upload-heading"><i class="bi bi-upload me-2"></i>Upload a question document</h2>
+  <p class="sq-note mb-3">Word (.docx) or PowerPoint (.pptx). Number each question (1., 2., …), label options A., B., C., D., and add an
+    instructor answer key after the questions (a table or lines such as “1. B”). Each upload becomes its own bank.
+    Nothing is shown to students: you review every question before it can be used.</p>
+  <form method="post" action="/admin/question-banks/upload" enctype="multipart/form-data" class="row g-3 align-items-end">
+    <div class="col-md-4">
+      <label class="form-label" for="bank-file">Document</label>
+      <input class="form-control" type="file" id="bank-file" name="file" accept=".docx,.pptx" required>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="bank-title">Bank name <span class="sq-note">(optional)</span></label>
+      <input class="form-control" id="bank-title" name="title" maxlength="200" placeholder="e.g. Session 1 Question Bank">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="bank-module">Course / module <span class="sq-note">(optional)</span></label>
+      <select class="form-select" id="bank-module" name="module_id">
+        <option value="">Not linked</option>
+        {% for course in courses %}
+        <option value="c{{ course.id }}">{{ course.name }} (whole course)</option>
+        {% for module in modules if module.course_id == course.id %}<option value="{{ module.id }}">{{ course.name }} › {{ module.title }}</option>{% endfor %}
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-sq btn-sq-primary w-100" type="submit">Upload &amp; extract</button>
+    </div>
+    <div class="col-12">
+      <label class="small sq-note"><input type="checkbox" name="allow_duplicate" value="yes" class="form-check-input me-1">
+        Import anyway if this exact file was uploaded before (creates a separate bank)</label>
+    </div>
+  </form>
+</section>
+
+<nav class="d-flex flex-wrap gap-2 mb-3" aria-label="Bank status filter">
+  {% for key, label in [("active", "Active"), ("draft", "Awaiting review"), ("archived", "Archived"), ("deleted", "Recently deleted"), ("all", "All")] %}
+  <a class="btn btn-sm {% if filters.status == key %}btn-sq btn-sq-primary{% else %}btn-sq btn-sq-outline{% endif %}"
+     href="/admin/question-banks?status={{ key }}{% if filters.course_id %}&course_id={{ filters.course_id }}{% endif %}">{{ label }} ({{ counts.get(key, 0) }})</a>
+  {% endfor %}
+</nav>
+<form method="get" action="/admin/question-banks" class="row g-2 align-items-end mb-3">
+  <input type="hidden" name="status" value="{{ filters.status }}">
+  <div class="col-sm-5"><label class="form-label small" for="filter-course">Course</label>
+    <select class="form-select form-select-sm" id="filter-course" name="course_id">
+      <option value="">Any course</option>
+      {% for course in courses %}<option value="{{ course.id }}" {% if filters.course_id == course.id %}selected{% endif %}>{{ course.name }}</option>{% endfor %}
+    </select></div>
+  <div class="col-sm-5"><label class="form-label small" for="filter-q">Search</label>
+    <input class="form-control form-control-sm" id="filter-q" type="search" name="q" value="{{ filters.q }}" autocomplete="off" data-clear-search></div>
+  <div class="col-sm-2"><button class="btn btn-sm btn-sq btn-sq-outline w-100" type="submit">Filter</button></div>
+</form>
+
+{% for row in rows %}
+{% set bank = row.bank %}
+<article class="sq-card p-3 p-md-4 mb-3" data-bank-row="{{ bank.id }}" data-bank-status="{{ row.status.key }}">
+  <div class="d-flex flex-wrap justify-content-between gap-2">
+    <div>
+      <h2 class="h5 mb-1"><a href="/admin/question-banks/{{ bank.id }}{% if row.status.key == 'draft' %}/import{% endif %}" style="color: var(--sq-text);">{{ bank.title }}</a></h2>
+      <div class="sq-note">
+        {{ bank.source_filename }} · uploaded {{ bank.created_at.strftime('%b %d, %Y %H:%M') }} · v{{ bank.version_number }}
+        · {% if bank.course %}{{ bank.course.name }}{% if bank.module %} › {{ bank.module.title }}{% endif %}{% else %}no course{% endif %}
+      </div>
+    </div>
+    <span class="badge {{ row.status.badge }} align-self-start">{{ row.status.label }}</span>
+  </div>
+  <div class="d-flex flex-wrap gap-3 mt-2 small">
+    <span><strong>{{ row.total }}</strong> question(s)</span>
+    <span style="color: var(--sq-mint);"><strong>{{ row.ready }}</strong> ready</span>
+    {% if row.needs_review %}<span style="color: var(--sq-amber);"><strong>{{ row.needs_review }}</strong> need review</span>{% endif %}
+    {% if row.excluded %}<span class="sq-note">{{ row.excluded }} excluded</span>{% endif %}
+    <span class="sq-note">Types: {% for type, n in row.types.items() %}{{ type_labels.get(type, type) }} ×{{ n }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
+    <span class="sq-note">Answer key: {{ "complete" if row.answer_key_complete else (row.with_key ~ "/" ~ row.total ~ " answered") }}</span>
+    <span class="sq-note">Used: {{ row.used_questions }} question(s) in {{ row.used_quizzes }} quiz(zes)</span>
+  </div>
+</article>
+{% else %}
+<div class="sq-card text-center py-5">
+  <p class="mb-1">No question banks here yet.</p>
+  <p class="sq-note mb-0">Upload a Word or PowerPoint quiz document above to create your first bank.</p>
+</div>
+{% endfor %}
+{% endblock %}

@@ -357,6 +357,9 @@
         <a class="nav-link {% if active_page == 'quizzes' %}active{% endif %}" href="/admin#recent-quizzes">
           <i class="bi bi-patch-question-fill"></i> Quizzes
         </a>
+        <a class="nav-link {% if active_page == 'question-banks' %}active{% endif %}" href="/admin/question-banks">
+          <i class="bi bi-file-earmark-text-fill"></i> Question Banks
+        </a>
         <a class="nav-link {% if active_page == 'students' %}active{% endif %}" href="/admin/students">
           <i class="bi bi-people-fill"></i> Students
         </a>
@@ -422,6 +425,7 @@
       if (overlay) overlay.addEventListener('click', closeSidebar);
     })();
   </script>
+  {% include "_teacher_ui.html" %}
   {% block extra_script %}{% endblock %}
 </body>
 </html>

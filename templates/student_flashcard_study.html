@@ -4,7 +4,10 @@
 {% block extra_head %}
 <style>
   .study-shell { max-width: 760px; }
-  .study-card { min-height: 270px; display: flex; flex-direction: column; justify-content: center; cursor: pointer; }
+  .study-card { min-height: 270px; display: flex; flex-direction: column; justify-content: center; cursor: pointer; height: auto; color: var(--sq-text); }
+  /* .sq-card lifts on hover; a card you are reading should stay still. */
+  .study-card:hover { transform: none; }
+  .study-status .badge { font-size: .85rem; font-weight: 600; padding: .45em .8em; white-space: normal; }
   .study-card:focus-visible { outline: 3px solid var(--sq-primary-hi); outline-offset: 3px; }
   .study-answer { white-space: pre-wrap; }
   .rating-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
@@ -13,12 +16,12 @@
 {% endblock %}
 
 {% block content %}
-<main class="container study-shell py-4 py-md-5">
-  <div class="d-flex justify-content-between align-items-center gap-2 mb-4">
-    <div><p class="sq-eyebrow mb-2">Spaced repetition</p><h1 class="h2 mb-0">Flashcard study</h1><p class="text-secondary mb-0">{{ module_title }}</p></div>
-    <a class="btn btn-sq btn-sq-outline" href="/student/dashboard">Dashboard</a>
+<main class="container study-shell sq-page">
+  <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4" data-study-header>
+    <div style="min-width: 0;"><p class="sq-eyebrow mb-2">Spaced repetition</p><h1 class="h2 mb-1">Flashcard study</h1><p class="text-secondary mb-0">{{ module_title }}</p></div>
+    <a class="btn btn-sq btn-sq-outline flex-shrink-0" href="/student/dashboard"><i class="bi bi-arrow-left me-1" aria-hidden="true"></i>Dashboard</a>
   </div>
-  <div class="d-flex flex-wrap gap-3 mb-3" aria-live="polite">
+  <div class="study-status d-flex flex-wrap gap-2 mb-3" aria-live="polite">
     <span class="badge text-bg-secondary">Reviewed today: <span id="reviewed-today">0</span></span>
     <span class="badge text-bg-secondary">Cards remaining: <span id="remaining-count">0</span></span>
   </div>

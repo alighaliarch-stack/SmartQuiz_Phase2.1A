@@ -1,0 +1,32 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Answer key · {{ bank.title }} · {{ app_name }}{% endblock %}
+{% block page_title %}Answer Key{% endblock %}
+
+{% block content %}
+<a href="/admin/question-banks/{{ bank.id }}" class="sq-note"><i class="bi bi-arrow-left me-1"></i>{{ bank.title }}</a>
+<h1 class="h4 mt-2 mb-1">Instructor answer key — {{ bank.title }}</h1>
+<p class="sq-note">Teacher only. Never shown to students. {{ bank.source_filename }} · v{{ bank.version_number }}</p>
+<div class="sq-card p-3 table-responsive">
+  <table class="table sq-table mb-0" data-answer-key>
+    <thead><tr><th>Q</th><th>Type</th><th>Correct answer</th><th>As written in the key</th><th>Explanation</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for view in views %}
+      {% set q = view.q %}
+      <tr>
+        <td>{{ q.question_number or q.position }}</td>
+        <td class="sq-note">{{ type_labels.get(q.question_type, q.question_type) }}</td>
+        <td dir="auto">
+          {% if q.question_type in ["mcq_single", "mcq_multiple"] %}
+            {% for i in view.correct_indexes %}{{ view.labels[i] }}. {{ view.options[i] }}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}
+          {% elif q.question_type == "true_false" %}{{ view.correct or "—" }}
+          {% else %}{{ view.expected_answers or "—" }}{% if q.marking_guidance %}<br><span class="sq-note">Guidance: {{ q.marking_guidance }}</span>{% endif %}{% endif %}
+        </td>
+        <td class="sq-note">{{ q.answer_key_raw or "not found" }}</td>
+        <td class="sq-note" dir="auto">{{ q.explanation or "—" }}</td>
+        <td><span class="badge {{ view.status_label[1] }}">{{ view.status_label[0] }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

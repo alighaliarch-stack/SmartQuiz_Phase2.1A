@@ -114,6 +114,22 @@
     .sq-navbar .nav-link:hover,
     .sq-navbar .nav-link.active { color: var(--sq-text) !important; }
 
+    /* ------------------------------------------------------- app pages */
+    /* The navbar is position: fixed, so it takes no space in the page flow.
+       Hero pages make room with their own large top padding; app pages
+       (student learning, study, practice) use .sq-page, which starts the
+       content below the navbar's real height (measured by the script at
+       the end of this file; 72px until then) plus normal spacing. */
+    :root { --sq-navbar-h: 72px; }
+    .sq-page {
+      padding-top: calc(var(--sq-navbar-h) + 1.75rem);
+      padding-bottom: 2.5rem;
+    }
+    .sq-page [id] { scroll-margin-top: calc(var(--sq-navbar-h) + 1rem); }
+    @media (min-width: 768px) {
+      .sq-page { padding-top: calc(var(--sq-navbar-h) + 2.5rem); }
+    }
+
     /* ------------------------------------------------------------ hero */
 
     .sq-hero {
@@ -351,6 +367,21 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    (function () {
+      // Keep --sq-navbar-h equal to the fixed navbar's collapsed height
+      // (it changes with breakpoints and font size).
+      var bar = document.querySelector('.sq-navbar');
+      if (!bar) return;
+      function measure() {
+        var collapse = bar.querySelector('.navbar-collapse.show');
+        if (collapse) return;  // an open mobile menu overlays content on purpose
+        document.documentElement.style.setProperty('--sq-navbar-h', bar.offsetHeight + 'px');
+      }
+      measure();
+      window.addEventListener('resize', measure);
+    })();
+  </script>
   {% block extra_script %}{% endblock %}
 </body>
 </html>

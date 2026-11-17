@@ -1,0 +1,387 @@
+{#
+  Phase 4A shared teacher UI: one dropdown design, clear-search controls and
+  the "generating…" state of AI generation forms. Included once by
+  dashboard_base.html, so every teacher page gets the same behaviour.
+
+  Dropdowns. Browsers draw the open list of a native <select> themselves, and
+  most ignore option colours (macOS, iOS, Android always do), so the required
+  green design cannot be reached with CSS alone. Each `select.form-select` is
+  therefore progressively enhanced into an accessible select-only combobox
+  (WAI-ARIA APG pattern). The native <select> stays in the form, hidden, and
+  remains the single source of truth: it is what gets submitted, what
+  `required` validates, and what existing page scripts read and listen to
+  (`change` is dispatched on it). Without JavaScript the native select is used,
+  with the same option colours where the browser allows it.
+  Opt out per element with `data-native-select`; `multiple` selects are left
+  native.
+#}
+<style>
+  :root {
+    --sq-option-bg: #8FBE9D;        /* unselected option: light green, black text (contrast 9.8:1) */
+    --sq-option-text: #111111;
+    --sq-option-selected-bg: #176B3A; /* selected option: royal green, white text (contrast 6.6:1) */
+    --sq-option-selected-text: #FFFFFF;
+    --sq-option-hover-bg: #A6CDB1;
+  }
+  /* No-JS / native fallback (honoured by Chromium and Firefox on Windows and Linux). */
+  .form-select option { background-color: var(--sq-option-bg); color: var(--sq-option-text); }
+  .form-select option:checked { background-color: var(--sq-option-selected-bg); color: var(--sq-option-selected-text); }
+
+  /* min-width: 0 lets the control shrink inside flex rows on narrow screens
+     (a flex item otherwise refuses to be narrower than its longest label). */
+  .sq-select { position: relative; width: 100%; min-width: 0; max-width: 100%; }
+  .d-flex > .sq-select, .input-group > .sq-select { flex: 1 1 12rem; width: auto; }
+  /* Inline action forms in wrapping rows (content bank cards) must not be
+     wider than the row, so their own controls wrap on phones. */
+  .d-flex.flex-wrap > form { min-width: 0; max-width: 100%; }
+  .sq-select.sq-select-inline { display: inline-block; width: auto; min-width: 12rem; max-width: 100%; vertical-align: middle; }
+  .sq-select-native {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; pointer-events: none; z-index: -1;
+  }
+  .sq-select-trigger {
+    display: block; width: 100%; max-width: 100%; min-width: 0; text-align: left; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 2.6rem;
+  }
+  .sq-select-trigger.form-select-sm { min-height: 2.1rem; }
+  .sq-select-trigger:focus-visible { outline: 3px solid var(--sq-option-bg); outline-offset: 2px; }
+  .sq-select-trigger[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+  .sq-select-trigger.is-invalid { border-color: var(--sq-rose-hi, #FF6B5C); }
+  .sq-select-list {
+    position: absolute; left: 0; top: calc(100% + 4px); z-index: 1060;
+    min-width: 100%; max-width: min(90vw, 36rem); max-height: 18rem; overflow-y: auto;
+    margin: 0; padding: 4px; list-style: none;
+    background: var(--sq-option-bg); border: 0; border-radius: 12px;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, .45);
+  }
+  .sq-select-list.sq-select-up { top: auto; bottom: calc(100% + 4px); }
+  /* Cards use backdrop-filter, which makes each one its own stacking context,
+     so an open list could not otherwise rise above the cards after it. */
+  .sq-select-lift { position: relative; z-index: 1065 !important; }
+  .sq-select-list[hidden] { display: none; }
+  .sq-select-option {
+    padding: .55rem .8rem; margin: 2px 0; border-radius: 8px; cursor: pointer;
+    background: var(--sq-option-bg); color: var(--sq-option-text);
+    border: 2px solid transparent; /* no visible stroke on unselected options */
+    font-size: .92rem; line-height: 1.3; overflow-wrap: anywhere;
+  }
+  .sq-select-option:hover { background: var(--sq-option-hover-bg); }
+  .sq-select-option[aria-selected="true"] {
+    background: var(--sq-option-selected-bg); color: var(--sq-option-selected-text);
+    border-color: var(--sq-option-selected-bg); font-weight: 600;
+  }
+  /* Keyboard position: a clear inner ring, distinct from the selected fill. */
+  .sq-select-option.sq-select-active { box-shadow: inset 0 0 0 2px var(--sq-option-text); }
+  .sq-select-option.sq-select-active[aria-selected="true"] { box-shadow: inset 0 0 0 2px var(--sq-option-selected-text); }
+  .sq-select-option[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+
+  /* Clear-search control */
+  .sq-search-wrap { position: relative; display: block; flex: 1 1 auto; min-width: 0; }
+  .input-group > .sq-search-wrap > .form-control { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .sq-search-wrap > .form-control { padding-right: 2.4rem; width: 100%; }
+  .sq-search-clear {
+    position: absolute; top: 50%; right: .45rem; transform: translateY(-50%); z-index: 5;
+    width: 1.7rem; height: 1.7rem; border-radius: 50%; border: 0; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--sq-glass-strong, rgba(255,255,255,.1)); color: var(--sq-text, #fff); cursor: pointer;
+  }
+  .sq-search-clear:hover { background: rgba(255,255,255,.2); }
+  .sq-search-clear:focus-visible { outline: 2px solid var(--sq-option-bg); outline-offset: 1px; }
+  .sq-search-clear[hidden] { display: none; }
+  input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+
+  /* Generation in progress */
+  .sq-busy-spinner {
+    display: inline-block; width: .9em; height: .9em; margin-right: .4em; vertical-align: -.1em;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: sqSpin .8s linear infinite;
+  }
+  @keyframes sqSpin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .sq-busy-spinner { animation: none; border-right-color: currentColor; } }
+</style>
+<script>
+(function () {
+  "use strict";
+  var uid = 0;
+  function nextId(prefix) { uid += 1; return prefix + "-" + uid; }
+
+  /* ------------------------------------------------------------------ dropdown */
+  function enhanceSelect(select) {
+    if (select.dataset.sqEnhanced || select.multiple || select.hasAttribute("data-native-select")) return;
+    select.dataset.sqEnhanced = "1";
+    var small = select.classList.contains("form-select-sm");
+    var wrap = document.createElement("div");
+    wrap.className = "sq-select";
+    if (select.classList.contains("d-inline-block")) wrap.classList.add("sq-select-inline");
+    select.parentNode.insertBefore(wrap, select);
+    wrap.appendChild(select);
+    if (!select.id) select.id = nextId("sq-native");
+
+    var trigger = document.createElement("div");
+    trigger.className = "form-select sq-select-trigger" + (small ? " form-select-sm" : "");
+    trigger.id = nextId("sq-combo");
+    trigger.setAttribute("role", "combobox");
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    var list = document.createElement("ul");
+    list.className = "sq-select-list";
+    list.id = nextId("sq-listbox");
+    list.setAttribute("role", "listbox");
+    list.hidden = true;
+    trigger.setAttribute("aria-controls", list.id);
+
+    var label = document.querySelector('label[for="' + CSS.escape(select.id) + '"]');
+    if (label) {
+      if (!label.id) label.id = nextId("sq-label");
+      trigger.setAttribute("aria-labelledby", label.id);
+      list.setAttribute("aria-labelledby", label.id);
+      label.addEventListener("click", function (event) { event.preventDefault(); trigger.focus(); });
+    } else if (select.getAttribute("aria-label")) {
+      trigger.setAttribute("aria-label", select.getAttribute("aria-label"));
+      list.setAttribute("aria-label", select.getAttribute("aria-label"));
+    }
+    if (select.required) trigger.setAttribute("aria-required", "true");
+
+    select.tabIndex = -1;
+    select.setAttribute("aria-hidden", "true");
+    select.classList.add("sq-select-native");
+    wrap.appendChild(trigger);
+    wrap.appendChild(list);
+
+    var options = [], active = -1, typed = "", typedAt = 0;
+
+    function usable(option) { return !option.hidden && !option.disabled; }
+    function render() {
+      var current = select.options[select.selectedIndex];
+      trigger.textContent = current ? current.text : "";
+      trigger.setAttribute("aria-disabled", select.disabled ? "true" : "false");
+      trigger.tabIndex = select.disabled ? -1 : 0;
+      trigger.classList.toggle("is-invalid", select.classList.contains("is-invalid"));
+    }
+    function build() {
+      list.innerHTML = "";
+      options = [];
+      Array.prototype.forEach.call(select.options, function (option) {
+        if (option.hidden) return;
+        var item = document.createElement("li");
+        item.className = "sq-select-option";
+        item.id = nextId("sq-option");
+        item.setAttribute("role", "option");
+        item.textContent = option.text;
+        item.setAttribute("aria-selected", option.selected ? "true" : "false");
+        if (option.disabled) item.setAttribute("aria-disabled", "true");
+        item.addEventListener("mousedown", function (event) { event.preventDefault(); });
+        item.addEventListener("click", function () { if (usable(option)) { choose(option); close(true); } });
+        list.appendChild(item);
+        options.push({ option: option, item: item });
+      });
+    }
+    function setActive(index) {
+      if (active >= 0 && options[active]) options[active].item.classList.remove("sq-select-active");
+      active = index;
+      if (active >= 0 && options[active]) {
+        options[active].item.classList.add("sq-select-active");
+        trigger.setAttribute("aria-activedescendant", options[active].item.id);
+        options[active].item.scrollIntoView({ block: "nearest" });
+      } else {
+        trigger.removeAttribute("aria-activedescendant");
+      }
+    }
+    function step(from, delta) {
+      for (var i = from + delta; i >= 0 && i < options.length; i += delta) {
+        if (usable(options[i].option)) return i;
+      }
+      return from;
+    }
+    function isOpen() { return !list.hidden; }
+    var lifted = [];
+    function lift() {
+      for (var node = wrap.parentElement; node && node !== document.body; node = node.parentElement) {
+        var cs = getComputedStyle(node);
+        if (cs.backdropFilter !== "none" || cs.webkitBackdropFilter && cs.webkitBackdropFilter !== "none" ||
+            cs.transform !== "none" || cs.filter !== "none" || (cs.position !== "static" && cs.zIndex !== "auto")) {
+          node.classList.add("sq-select-lift");
+          lifted.push(node);
+        }
+      }
+    }
+    function unlift() { lifted.forEach(function (node) { node.classList.remove("sq-select-lift"); }); lifted = []; }
+    function open() {
+      if (select.disabled || isOpen()) return;
+      build();
+      lift();
+      list.hidden = false;
+      list.classList.remove("sq-select-up");
+      var rect = list.getBoundingClientRect();
+      if (rect.bottom > window.innerHeight && trigger.getBoundingClientRect().top > rect.height) list.classList.add("sq-select-up");
+      trigger.setAttribute("aria-expanded", "true");
+      var selected = -1;
+      options.forEach(function (entry, i) { if (entry.option.selected) selected = i; });
+      setActive(selected >= 0 && usable(options[selected].option) ? selected : step(-1, 1));
+    }
+    function close(refocus) {
+      if (!isOpen()) return;
+      list.hidden = true;
+      unlift();
+      trigger.setAttribute("aria-expanded", "false");
+      setActive(-1);
+      if (refocus) trigger.focus();
+    }
+    function choose(option) {
+      if (option.selected && option.index === select.selectedIndex) { render(); return; }
+      select.selectedIndex = option.index;
+      select.classList.remove("is-invalid");
+      render();
+      select.dispatchEvent(new Event("input", { bubbles: true }));
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    function typeahead(key) {
+      var now = Date.now();
+      typed = (now - typedAt > 700 ? "" : typed) + key.toLowerCase();
+      typedAt = now;
+      if (!isOpen()) build();
+      var current = -1;
+      options.forEach(function (entry, i) { if (isOpen() ? i === active : entry.option.selected) current = i; });
+      var offset = typed.length > 1 ? 0 : 1;  // a repeated first letter cycles; a longer prefix refines
+      for (var n = 0; n < options.length; n += 1) {
+        var entry = options[(current + offset + n + options.length) % options.length];
+        if (usable(entry.option) && entry.option.text.trim().toLowerCase().indexOf(typed) === 0) {
+          if (isOpen()) setActive(options.indexOf(entry)); else choose(entry.option);
+          return;
+        }
+      }
+    }
+
+    trigger.addEventListener("click", function () { if (isOpen()) close(false); else open(); });
+    trigger.addEventListener("keydown", function (event) {
+      if (select.disabled) return;
+      var key = event.key;
+      if (!isOpen()) {
+        if (key === "ArrowDown" || key === "ArrowUp" || key === "Enter" || key === " " || key === "Home" || key === "End") {
+          event.preventDefault();
+          open();
+          if (key === "Home") setActive(step(-1, 1));
+          if (key === "End") setActive(step(options.length, -1));
+        } else if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          typeahead(key);
+        }
+        return;
+      }
+      if (key === "ArrowDown") { event.preventDefault(); setActive(step(active, 1)); }
+      else if (key === "ArrowUp") { event.preventDefault(); setActive(step(active, -1)); }
+      else if (key === "Home") { event.preventDefault(); setActive(step(-1, 1)); }
+      else if (key === "End") { event.preventDefault(); setActive(step(options.length, -1)); }
+      else if (key === "PageDown") { event.preventDefault(); for (var d = 0; d < 8; d += 1) setActive(step(active, 1)); }
+      else if (key === "PageUp") { event.preventDefault(); for (var u = 0; u < 8; u += 1) setActive(step(active, -1)); }
+      else if (key === "Enter" || key === " ") {
+        event.preventDefault();
+        if (active >= 0 && usable(options[active].option)) choose(options[active].option);
+        close(true);
+      }
+      else if (key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); }
+      else if (key === "Tab") { close(false); }
+      else if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) { typeahead(key); }
+    });
+    trigger.addEventListener("blur", function () {
+      setTimeout(function () { if (!wrap.contains(document.activeElement)) close(false); }, 0);
+    });
+    document.addEventListener("mousedown", function (event) { if (!wrap.contains(event.target)) close(false); });
+
+    // The native select stays authoritative: keep the trigger in step with it,
+    // including values set by page scripts and form resets.
+    select.addEventListener("change", render);
+    select.addEventListener("focus", function () { trigger.focus(); });
+    select.addEventListener("invalid", function () {
+      select.classList.add("is-invalid");
+      render();
+      trigger.focus();
+    });
+    ["value", "selectedIndex"].forEach(function (prop) {
+      var proto = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, prop);
+      Object.defineProperty(select, prop, {
+        configurable: true,
+        get: function () { return proto.get.call(this); },
+        set: function (v) { proto.set.call(this, v); render(); }
+      });
+    });
+    if (select.form) select.form.addEventListener("reset", function () { setTimeout(render, 0); });
+    new MutationObserver(render).observe(select, { attributes: true, attributeFilter: ["disabled", "class"] });
+    render();
+  }
+
+  /* ------------------------------------------------------------- clear search */
+  function enhanceSearch(input) {
+    if (input.dataset.sqClearReady) return;
+    input.dataset.sqClearReady = "1";
+    input.setAttribute("autocomplete", "off");
+    var wrap = document.createElement("span");
+    wrap.className = "sq-search-wrap";
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "sq-search-clear";
+    button.setAttribute("aria-label", "Clear search");
+    button.title = "Clear search";
+    button.innerHTML = '<i class="bi bi-x-lg" aria-hidden="true"></i>';
+    wrap.appendChild(button);
+    // Value the page was loaded with: if a search is applied, clearing re-runs
+    // the form without it (other filters in the form keep their values).
+    var applied = input.defaultValue.trim() !== "";
+    function sync() { button.hidden = input.value === ""; }
+    function clear() {
+      input.value = "";
+      sync();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      if (applied && input.form) {
+        if (input.form.requestSubmit) input.form.requestSubmit(); else input.form.submit();
+      } else {
+        input.focus();
+      }
+    }
+    button.addEventListener("click", clear);
+    input.addEventListener("input", sync);
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && input.value !== "") { event.preventDefault(); clear(); }
+    });
+    sync();
+  }
+
+  /* ------------------------------------------------- AI generation busy state */
+  function enhanceGenerateForm(form) {
+    if (form.dataset.sqBusyReady) return;
+    form.dataset.sqBusyReady = "1";
+    form.addEventListener("submit", function (event) {
+      if (form.dataset.submitting === "1") { event.preventDefault(); return; }
+      form.dataset.submitting = "1";
+      form.setAttribute("aria-busy", "true");
+      var button = form.querySelector('button[type="submit"]');
+      if (!button) return;
+      button.dataset.idleHtml = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = '<span class="sq-busy-spinner" aria-hidden="true"></span>' +
+        (form.dataset.busyLabel || "Working…").replace(/[&<>"]/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+        });
+    });
+  }
+  // Coming back with the browser's Back button must not leave buttons stuck.
+  window.addEventListener("pageshow", function (event) {
+    if (!event.persisted) return;
+    document.querySelectorAll("form[data-generate-form]").forEach(function (form) {
+      form.dataset.submitting = "";
+      form.removeAttribute("aria-busy");
+      var button = form.querySelector('button[type="submit"]');
+      if (button && button.dataset.idleHtml) { button.innerHTML = button.dataset.idleHtml; button.disabled = false; }
+    });
+  });
+
+  function init() {
+    document.querySelectorAll("select.form-select").forEach(enhanceSelect);
+    document.querySelectorAll("input[data-clear-search]").forEach(enhanceSearch);
+    document.querySelectorAll("form[data-generate-form]").forEach(enhanceGenerateForm);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
+  window.SmartQuizUI = { enhanceSelect: enhanceSelect, enhanceSearch: enhanceSearch, refresh: init };
+})();
+</script>

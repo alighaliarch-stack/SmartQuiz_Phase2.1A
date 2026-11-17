@@ -21,8 +21,11 @@
     <div class="d-flex flex-wrap gap-2">
       <a href="{{ student_portal_url }}" class="btn btn-sq btn-sq-outline">Student Portal</a>
       <button type="button" class="btn btn-sq btn-sq-outline" data-copy-portal data-portal-url="{{ student_portal_url }}">Copy Student Login Link</button>
-      <a href="/admin/quizzes/new" class="btn btn-sq btn-sq-primary btn-sq-lg">
-        <i class="bi bi-plus-lg me-2"></i>Create Quiz
+      <a href="/admin/quizzes/new" class="btn btn-sq btn-sq-primary btn-sq-lg" data-create-manual>
+        <i class="bi bi-plus-lg me-2"></i>Create Quiz Manually
+      </a>
+      <a href="/admin/quizzes/assemble" class="btn btn-sq btn-sq-primary btn-sq-lg" data-create-from-banks>
+        <i class="bi bi-collection me-2"></i>Create Quiz from Question Banks
       </a>
     </div>
   </div>

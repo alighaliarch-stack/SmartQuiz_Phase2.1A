@@ -1,0 +1,154 @@
+{% extends "dashboard_base.html" %}
+{% block title %}{{ bank.title }} · Question bank · {{ app_name }}{% endblock %}
+{% block page_title %}Question Bank{% endblock %}
+
+{% block content %}
+{% set status = summary.status %}
+{% set editable = bank.is_current and bank.deleted_at is none %}
+<a href="/admin/question-banks" class="sq-note"><i class="bi bi-arrow-left me-1"></i>Question banks</a>
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mt-2 mb-3">
+  <div>
+    <h1 class="h3 mb-1">{{ bank.title }} <span class="badge {{ status.badge }} align-middle" style="font-size: .7rem;" data-bank-status>{{ status.label }}</span></h1>
+    <p class="sq-note mb-0">
+      {{ bank.source_filename }} · uploaded {{ bank.created_at.strftime('%b %d, %Y %H:%M') }} · version {{ bank.version_number }}
+      · {% if bank.course %}{{ bank.course.name }}{% if bank.module %} › {{ bank.module.title }}{% endif %}{% else %}no course{% endif %}
+    </p>
+  </div>
+  <div class="d-flex flex-wrap gap-2">
+    <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/question-banks/{{ bank.id }}/answer-key"><i class="bi bi-key me-1"></i>View answer key</a>
+    <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/question-banks/{{ bank.id }}/source"><i class="bi bi-file-earmark-text me-1"></i>Original document</a>
+    {% if editable and status.key in ["active", "archived"] %}
+    <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/question-banks/{{ bank.id }}/replace"><i class="bi bi-arrow-repeat me-1"></i>Replace</a>
+    {% endif %}
+    {% if status.key == "active" %}
+    <form method="post" action="/admin/question-banks/{{ bank.id }}/archive"><button class="btn btn-sm btn-sq btn-sq-outline" type="submit"><i class="bi bi-archive me-1"></i>Archive</button></form>
+    {% elif status.key in ["archived", "deleted"] %}
+    <form method="post" action="/admin/question-banks/{{ bank.id }}/restore"><button class="btn btn-sm btn-success" type="submit"><i class="bi bi-arrow-counterclockwise me-1"></i>Restore</button></form>
+    {% endif %}
+    {% if status.key == "deleted" %}
+    <a class="btn btn-sm btn-outline-danger" href="/admin/question-banks/{{ bank.id }}/purge">Delete permanently</a>
+    {% else %}
+    <a class="btn btn-sm btn-outline-danger" href="/admin/question-banks/{{ bank.id }}/delete"><i class="bi bi-trash3 me-1"></i>Delete</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if notice %}<div class="alert alert-info" role="status" data-notice>{{ notice }}</div>{% endif %}
+{% if error_message %}<div class="alert alert-danger" role="alert" data-error>{{ error_message }}</div>{% endif %}
+{% if not bank.is_current and bank.status == "ACTIVE" %}
+<div class="alert alert-secondary" role="status">This version was replaced and is kept read-only so quizzes and results that used it keep their history.</div>
+{% endif %}
+
+<div class="row g-3 mb-3">
+  <div class="col-6 col-md-3"><div class="sq-card stat-card"><div class="val">{{ summary.total }}</div><div class="lbl">Questions</div></div></div>
+  <div class="col-6 col-md-3"><div class="sq-card stat-card"><div class="val" style="color: var(--sq-mint);">{{ summary.ready }}</div><div class="lbl">Ready</div></div></div>
+  <div class="col-6 col-md-3"><div class="sq-card stat-card"><div class="val" style="color: var(--sq-amber);">{{ summary.needs_review }}</div><div class="lbl">Need review</div></div></div>
+  <div class="col-6 col-md-3"><div class="sq-card stat-card"><div class="val">{{ summary.used_questions }}</div><div class="lbl">Used in {{ summary.used_quizzes }} quiz(zes)</div></div></div>
+</div>
+
+{% if editable %}
+<details class="sq-card p-3 mb-3">
+  <summary>Edit bank details</summary>
+  <form method="post" action="/admin/question-banks/{{ bank.id }}/edit" class="row g-2 mt-2">
+    <div class="col-md-4"><label class="form-label small" for="edit-title">Name</label>
+      <input class="form-control form-control-sm" id="edit-title" name="title" value="{{ bank.title }}" maxlength="200" required></div>
+    <div class="col-md-4"><label class="form-label small" for="edit-placement">Course / module</label>
+      <select class="form-select form-select-sm" id="edit-placement" name="module_id">
+        <option value="">Not linked</option>
+        {% for course in courses %}
+        <option value="c{{ course.id }}" {% if bank.course_id == course.id and not bank.module_id %}selected{% endif %}>{{ course.name }} (whole course)</option>
+        {% for module in modules if module.course_id == course.id %}<option value="{{ module.id }}" {% if bank.module_id == module.id %}selected{% endif %}>{{ course.name }} › {{ module.title }}</option>{% endfor %}
+        {% endfor %}
+      </select></div>
+    <div class="col-md-3"><label class="form-label small" for="edit-description">Description</label>
+      <input class="form-control form-control-sm" id="edit-description" name="description" value="{{ bank.description }}"></div>
+    <div class="col-md-1 d-flex align-items-end"><button class="btn btn-sm btn-sq btn-sq-primary w-100" type="submit">Save</button></div>
+  </form>
+</details>
+{% endif %}
+
+<form method="get" action="/admin/question-banks/{{ bank.id }}" class="row g-2 align-items-end mb-3">
+  <div class="col-md-5"><label class="form-label small" for="q-search">Search questions</label>
+    <input class="form-control form-control-sm" id="q-search" type="search" name="q" value="{{ filters.q }}" autocomplete="off" data-clear-search></div>
+  <div class="col-md-3"><label class="form-label small" for="q-type">Type</label>
+    <select class="form-select form-select-sm" id="q-type" name="question_type">
+      <option value="">Any type</option>
+      {% for value, label in type_labels.items() %}<option value="{{ value }}" {% if filters.question_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select></div>
+  <div class="col-md-3"><label class="form-label small" for="q-state">Status</label>
+    <select class="form-select form-select-sm" id="q-state" name="state">
+      <option value="">Any status</option>
+      {% for value, label in [("READY", "Ready"), ("NEEDS_REVIEW", "Needs review"), ("EXCLUDED", "Excluded")] %}<option value="{{ value }}" {% if filters.state == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select></div>
+  <div class="col-md-1"><button class="btn btn-sm btn-sq btn-sq-outline w-100" type="submit">Filter</button></div>
+</form>
+
+{% for view in views %}
+{% set q = view.q %}
+<article class="sq-card p-3 mb-2" data-bank-question="{{ q.id }}" data-bq-status="{{ q.status }}">
+  <div class="d-flex flex-wrap justify-content-between gap-2">
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <span class="fw-bold">Q{{ q.question_number or q.position }}</span>
+      <span class="badge text-bg-light">{{ type_labels.get(q.question_type, q.question_type) }}</span>
+      <span class="badge {{ view.status_label[1] }}">{{ view.status_label[0] }}</span>
+      {% if view.edited %}<span class="badge text-bg-info">Edited</span>{% endif %}
+      {% if view.used_in %}<span class="badge text-bg-light">Used in {{ view.used_in|length }} quiz(zes)</span>{% endif %}
+    </div>
+    <div class="d-flex gap-1">
+      {% if editable %}
+      <a class="btn-sq-icon" href="/admin/question-banks/{{ bank.id }}/questions/{{ q.id }}/edit" title="Edit"><i class="bi bi-pencil"></i></a>
+      <a class="btn-sq-icon danger" href="/admin/question-banks/{{ bank.id }}/questions/{{ q.id }}/delete" title="Remove"><i class="bi bi-trash3"></i></a>
+      {% endif %}
+    </div>
+  </div>
+  <p class="mt-2 mb-1" style="white-space: pre-wrap;" dir="auto">{{ q.question_text }}</p>
+  {% if view.options and q.question_type in ["mcq_single", "mcq_multiple"] %}
+  <ul class="list-unstyled small mb-1">
+    {% for option in view.options %}
+    <li dir="auto">{% if loop.index0 in view.correct_indexes %}<i class="bi bi-check-circle-fill me-1" style="color: var(--sq-mint);" title="Correct"></i>{% else %}<i class="bi bi-circle me-1 sq-note"></i>{% endif %}{{ view.labels[loop.index0] }}. {{ option }}</li>
+    {% endfor %}
+  </ul>
+  {% elif q.question_type == "true_false" %}
+  <p class="small mb-1">Answer: <strong>{{ view.correct or "—" }}</strong></p>
+  {% elif q.question_type == "short_answer" %}
+  <p class="small mb-1">Expected: <strong>{{ view.expected_answers or "—" }}</strong>{% if q.marking_guidance %} · Guidance: {{ q.marking_guidance }}{% endif %}</p>
+  {% endif %}
+  {% if q.explanation %}<p class="small sq-note mb-1">Explanation: {{ q.explanation }}</p>{% endif %}
+  {% for message in view.errors %}<div class="small" style="color: var(--sq-rose-hi);">{{ message }}</div>{% endfor %}
+  {% for message in view.warnings %}<div class="small" style="color: var(--sq-amber);">{{ message }}</div>{% endfor %}
+  <div class="sq-note small">Source: {{ q.source_reference }}</div>
+</article>
+{% else %}
+<p class="sq-note">No questions match.</p>
+{% endfor %}
+
+{% if deleted_views %}
+<details class="mt-4">
+  <summary class="sq-note">Removed questions ({{ deleted_views|length }})</summary>
+  {% for view in deleted_views %}
+  <div class="sq-card p-3 mt-2 d-flex flex-wrap justify-content-between gap-2 align-items-center" data-removed-question="{{ view.q.id }}">
+    <span dir="auto">{{ view.q.question_text[:160] }}</span>
+    {% if editable %}<form method="post" action="/admin/question-banks/{{ bank.id }}/questions/{{ view.q.id }}/restore"><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Restore</button></form>{% endif %}
+  </div>
+  {% endfor %}
+</details>
+{% endif %}
+
+{% if versions|length > 1 %}
+<section class="mt-4">
+  <h2 class="h6">Versions</h2>
+  <div class="table-responsive sq-card p-3">
+    <table class="table sq-table mb-0">
+      <thead><tr><th>Version</th><th>File</th><th>Uploaded</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for version in versions %}
+        <tr><td><a href="/admin/question-banks/{{ version.id }}">v{{ version.version_number }}</a></td>
+          <td>{{ version.source_filename }}</td><td class="sq-note">{{ version.created_at.strftime('%b %d, %Y %H:%M') }}</td>
+          <td>{% if version.status == "DRAFT" %}Awaiting review{% elif version.is_current %}Current{% else %}Replaced{% endif %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

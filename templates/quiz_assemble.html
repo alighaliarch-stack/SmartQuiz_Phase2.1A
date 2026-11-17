@@ -1,0 +1,106 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Create quiz from question banks · {{ app_name }}{% endblock %}
+{% block page_title %}Create Quiz from Question Banks{% endblock %}
+
+{% block content %}
+<a href="/admin" class="sq-note"><i class="bi bi-arrow-left me-1"></i>Dashboard</a>
+<h1 class="h3 mt-2 mb-1">Create quiz from question banks</h1>
+<p class="sq-note mb-3">Step 1 of 2 — choose banks and how to select questions. Selection is done on the server; you can review, reorder and adjust everything in the next step.</p>
+{% if error_message %}<div class="alert alert-danger" role="alert" data-error>{{ error_message }}</div>{% endif %}
+
+<form method="get" action="/admin/quizzes/assemble" class="row g-2 align-items-end mb-3">
+  <div class="col-sm-8 col-md-5"><label class="form-label small" for="course-filter">Course</label>
+    <select class="form-select form-select-sm" id="course-filter" name="course_id" onchange="this.form.submit()">
+      <option value="">All courses</option>
+      {% for course in courses %}<option value="{{ course.id }}" {% if values.course_id == course.id %}selected{% endif %}>{{ course.name }}</option>{% endfor %}
+    </select></div>
+  <noscript><div class="col-auto"><button class="btn btn-sm btn-sq btn-sq-outline" type="submit">Show</button></div></noscript>
+</form>
+
+<form method="post" action="/admin/quizzes/assemble/preview" data-assemble-form>
+  {% if values.course_id %}<input type="hidden" name="course_id" value="{{ values.course_id }}">{% endif %}
+  <section class="sq-card p-3 p-md-4 mb-3">
+    <h2 class="h6 mb-3">1. Question banks</h2>
+    {% for row in banks %}
+    {% set bank = row.bank %}
+    <label class="d-flex flex-wrap align-items-center gap-2 py-2" style="border-bottom: 1px solid rgba(255,255,255,0.06); cursor: pointer;">
+      <input class="form-check-input mt-0" type="checkbox" name="bank_ids" value="{{ bank.id }}" data-ready="{{ row.ready }}"
+             {% if bank.id in values.bank_ids %}checked{% endif %}>
+      <span class="fw-semibold">{{ bank.title }}</span>
+      <span class="sq-note">{{ row.ready }} ready question(s){% if row.needs_review %} · {{ row.needs_review }} need review{% endif %}
+        · {% for type, n in row.types.items() %}{{ type_labels.get(type, type) }} ×{{ n }}{% if not loop.last %}, {% endif %}{% endfor %}
+        {% if bank.course %} · {{ bank.course.name }}{% if bank.module %} › {{ bank.module.title }}{% endif %}{% endif %}</span>
+    </label>
+    {% else %}
+    <p class="mb-0">No active question banks{% if values.course_id %} for this course{% endif %}. <a href="/admin/question-banks">Upload a question document</a> first.</p>
+    {% endfor %}
+    <p class="sq-note mt-2 mb-0" aria-live="polite">Selected pool: <strong data-pool-count>0</strong> ready question(s)</p>
+  </section>
+
+  <section class="sq-card p-3 p-md-4 mb-3">
+    <h2 class="h6 mb-3">2. Selection</h2>
+    <div class="d-flex flex-wrap gap-4 align-items-end">
+      <div>
+        <label class="d-block"><input class="form-check-input me-1" type="radio" name="mode" value="random" {% if values.mode == "random" %}checked{% endif %}> Random selection of</label>
+        <div class="d-flex align-items-center gap-2 mt-1">
+          <input class="form-control" type="number" min="1" name="count" value="{{ values.count }}" aria-label="Number of questions" style="max-width: 7rem;">
+          <span class="sq-note">questions</span>
+        </div>
+      </div>
+      <label><input class="form-check-input me-1" type="radio" name="mode" value="all" {% if values.mode == "all" %}checked{% endif %}> Use all questions</label>
+    </div>
+    <div class="d-flex flex-wrap gap-4 mt-3">
+      <label><input class="form-check-input me-1" type="checkbox" name="shuffle_order" value="true" {% if values.shuffle_order %}checked{% endif %}> Random question order</label>
+      <label><input class="form-check-input me-1" type="checkbox" name="shuffle_options" value="true" {% if values.shuffle_options %}checked{% endif %}> Randomise answer-option order</label>
+    </div>
+    <p class="sq-note small mt-2 mb-0">Wording and answers are never changed. With option randomisation the correct answer moves with its option.</p>
+  </section>
+
+  <section class="sq-card p-3 p-md-4 mb-3">
+    <h2 class="h6 mb-1">3. Starting time per question</h2>
+    <p class="sq-note small">Suggested starting values only — you can set every question's own time in the next step. The whole quiz must be {{ max_total|minsec }} or less.</p>
+    <div class="row g-3">
+      {% for type, label in type_labels.items() %}
+      <div class="col-sm-6 col-lg-3">
+        <span class="form-label d-block" id="time-{{ type }}">{{ label }}</span>
+        <div class="d-flex align-items-center gap-1" role="group" aria-labelledby="time-{{ type }}">
+          <input class="form-control" type="number" min="0" max="20" name="time_{{ type }}_min" value="{{ values.timings[type] // 60 }}" aria-label="{{ label }} minutes" style="max-width: 5rem;"><span class="sq-note">min</span>
+          <input class="form-control" type="number" min="0" max="59" name="time_{{ type }}_sec" value="{{ values.timings[type] % 60 }}" aria-label="{{ label }} seconds" style="max-width: 5rem;"><span class="sq-note">sec</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="sq-card p-3 p-md-4 mb-3">
+    <h2 class="h6 mb-3">4. Quiz details</h2>
+    <div class="row g-3">
+      <div class="col-md-6"><label class="form-label" for="quiz-title">Quiz title</label>
+        <input class="form-control" id="quiz-title" name="title" value="{{ values.title }}" maxlength="200" required></div>
+      <div class="col-md-3"><label class="form-label" for="quiz-pass">Passing %</label>
+        <input class="form-control" id="quiz-pass" type="number" min="0" max="100" name="passing_percentage" value="{{ values.passing_percentage }}"></div>
+      <div class="col-md-3 d-flex align-items-end"><label><input class="form-check-input me-1" type="checkbox" name="auto_advance" value="true" {% if values.auto_advance %}checked{% endif %}> Auto Advance</label></div>
+      <div class="col-12"><label class="form-label" for="quiz-description">Description</label>
+        <textarea class="form-control" id="quiz-description" name="description" rows="2">{{ values.description }}</textarea></div>
+    </div>
+  </section>
+
+  <button class="btn btn-sq btn-sq-primary btn-sq-lg" type="submit">Select questions &amp; preview</button>
+</form>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    var boxes = document.querySelectorAll('input[name="bank_ids"]');
+    var out = document.querySelector('[data-pool-count]');
+    function update() {
+      var total = 0;
+      boxes.forEach(function (b) { if (b.checked) total += parseInt(b.getAttribute('data-ready'), 10) || 0; });
+      if (out) out.textContent = total;
+    }
+    boxes.forEach(function (b) { b.addEventListener('change', update); });
+    update();
+  })();
+</script>
+{% endblock %}

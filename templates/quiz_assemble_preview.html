@@ -1,0 +1,123 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Preview quiz · {{ app_name }}{% endblock %}
+{% block page_title %}Create Quiz from Question Banks{% endblock %}
+
+{% macro item_row(item) %}
+{% set q = item.q %}
+<div class="sq-card p-3 mb-2" data-item="{{ q.id }}" data-seconds="{{ item.total_seconds }}">
+  <input type="hidden" name="item" value="{{ q.id }}">
+  <input type="hidden" name="order_{{ q.id }}" value="{{ item.order }}">
+  <div class="d-flex flex-wrap justify-content-between gap-2 align-items-start">
+    <div class="d-flex align-items-center gap-2">
+      <label class="d-flex align-items-center gap-2 mb-0" style="cursor: pointer;">
+        <input class="form-check-input mt-0" type="checkbox" name="include_{{ q.id }}" value="yes" data-include {% if item.included %}checked{% endif %}>
+        <span class="fw-bold" data-number></span>
+      </label>
+      <span class="badge text-bg-light">{{ type_labels.get(q.question_type, q.question_type) }}</span>
+      <span class="sq-note small">{{ item.bank.title }} · Q{{ q.question_number or q.position }}</span>
+    </div>
+    <div class="d-flex align-items-center gap-1" data-move-controls>
+      <button type="button" class="btn-sq-icon" data-move="-1" title="Move up" aria-label="Move up"><i class="bi bi-arrow-up"></i></button>
+      <button type="button" class="btn-sq-icon" data-move="1" title="Move down" aria-label="Move down"><i class="bi bi-arrow-down"></i></button>
+    </div>
+  </div>
+  <p class="mt-2 mb-1" style="white-space: pre-wrap;" dir="auto">{{ q.question_text }}</p>
+  {% if q.question_type in ["mcq_single", "mcq_multiple"] %}
+  <ol class="small mb-2" type="A">
+    {% for option in item.options %}<li dir="auto">{{ option }}{% if item.correct_flags[loop.index0] %} <i class="bi bi-check-circle-fill" style="color: var(--sq-mint);" title="Correct answer (teacher view)"></i>{% endif %}</li>{% endfor %}
+  </ol>
+  {% elif q.question_type == "true_false" %}
+  <p class="small mb-2">Answer: {{ item.correct }}</p>
+  {% else %}
+  <p class="small mb-2">Expected: {{ (item.correct or [])|join(" / ") }}</p>
+  {% endif %}
+  <div class="d-flex align-items-center gap-1" role="group" aria-label="Time for this question">
+    <i class="bi bi-hourglass-split sq-note me-1"></i>
+    <input class="form-control form-control-sm" type="number" min="0" max="20" name="min_{{ q.id }}" value="{{ item.minutes }}" aria-label="Minutes" style="max-width: 4.5rem;" data-min><span class="sq-note small">min</span>
+    <input class="form-control form-control-sm" type="number" min="0" max="59" name="sec_{{ q.id }}" value="{{ item.seconds }}" aria-label="Seconds" style="max-width: 4.5rem;" data-sec><span class="sq-note small">sec</span>
+  </div>
+</div>
+{% endmacro %}
+
+{% block content %}
+<h1 class="h3 mb-1">Preview: {{ values.title }}</h1>
+<p class="sq-note mb-3">Step 2 of 2 — reorder, include or leave out questions, and set each question's time. Teacher view: correct answers are marked here only.</p>
+{% if error_message %}<div class="alert alert-danger" role="alert" data-error>{{ error_message }}</div>{% endif %}
+{% for line in info %}<div class="alert alert-info py-2" role="status">{{ line }}</div>{% endfor %}
+
+<form method="post" action="/admin/quizzes/assemble/save" data-preview-form>
+  <input type="hidden" name="title" value="{{ values.title }}">
+  <input type="hidden" name="description" value="{{ values.description }}">
+  <input type="hidden" name="passing_percentage" value="{{ values.passing_percentage }}">
+  {% if values.auto_advance %}<input type="hidden" name="auto_advance" value="true">{% endif %}
+  {% for bank_id in values.bank_ids %}<input type="hidden" name="bank_ids" value="{{ bank_id }}">{% endfor %}
+  {% for type, seconds in values.timings.items() %}
+  <input type="hidden" name="time_{{ type }}_min" value="{{ seconds // 60 }}"><input type="hidden" name="time_{{ type }}_sec" value="{{ seconds % 60 }}">
+  {% endfor %}
+
+  <div class="sq-card p-3 mb-3 d-flex flex-wrap gap-3 align-items-center" style="position: sticky; top: 76px; z-index: 5;" data-total-bar>
+    <span><strong data-selected-count>{{ selected|length }}</strong> question(s)</span>
+    <span>Total time: <strong data-total-time>{{ total_seconds|minsec }}</strong> / {{ max_total|minsec }} maximum</span>
+    <span class="small" data-total-warning style="color: var(--sq-rose-hi);{% if not time_error %} display: none;{% endif %}">
+      <i class="bi bi-exclamation-triangle me-1"></i>Over the 10-minute limit: the quiz can be saved as a draft but cannot be published until you shorten some timers.</span>
+    <button class="btn btn-sq btn-sq-primary ms-auto" type="submit">Save quiz</button>
+  </div>
+  {% if time_error %}<div class="alert alert-warning" role="alert" data-time-error>{{ time_error }}</div>{% endif %}
+
+  <h2 class="h6">Selected questions</h2>
+  <div data-list="selected">{% for item in selected %}{{ item_row(item) }}{% endfor %}</div>
+
+  {% if pool_rest %}
+  <details class="mt-4" {% if not selected %}open{% endif %}>
+    <summary class="h6">Other ready questions in the selected banks ({{ pool_rest|length }}) — tick to add</summary>
+    <div data-list="pool" class="mt-2">{% for item in pool_rest %}{{ item_row(item) }}{% endfor %}</div>
+  </details>
+  {% endif %}
+</form>
+<a href="/admin/quizzes/assemble" class="btn btn-sq btn-sq-outline mt-3">Start again</a>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    var LIMIT = {{ max_total }};
+    var selectedList = document.querySelector('[data-list="selected"]');
+    var poolList = document.querySelector('[data-list="pool"]');
+    function seconds(row) {
+      var m = parseInt(row.querySelector('[data-min]').value, 10) || 0;
+      var s = parseInt(row.querySelector('[data-sec]').value, 10) || 0;
+      return m * 60 + s;
+    }
+    function fmt(total) { var m = Math.floor(total / 60), s = total % 60; return m + ' min ' + (s < 10 ? '0' : '') + s + ' sec'; }
+    function refresh() {
+      var rows = Array.prototype.filter.call(selectedList.querySelectorAll('[data-item]'), function (row) {
+        var included = row.querySelector('[data-include]').checked;
+        if (!included) row.querySelector('[data-number]').textContent = 'Left out';
+        return included;
+      }), total = 0;
+      rows.forEach(function (row, i) { row.querySelector('[data-number]').textContent = 'Question ' + (i + 1); total += seconds(row); });
+      if (poolList) poolList.querySelectorAll('[data-item]').forEach(function (row) { row.querySelector('[data-number]').textContent = 'Add'; });
+      document.querySelector('[data-selected-count]').textContent = rows.length;
+      document.querySelector('[data-total-time]').textContent = fmt(total);
+      document.querySelector('[data-total-warning]').style.display = total > LIMIT ? '' : 'none';
+    }
+    document.addEventListener('click', function (event) {
+      var button = event.target.closest('[data-move]');
+      if (!button) return;
+      var row = button.closest('[data-item]'), dir = parseInt(button.getAttribute('data-move'), 10);
+      if (dir < 0 && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+      if (dir > 0 && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+      refresh();
+    });
+    document.addEventListener('change', function (event) {
+      if (event.target.matches('[data-include]')) {
+        var row = event.target.closest('[data-item]');
+        (event.target.checked ? selectedList : (poolList || selectedList)).appendChild(row);
+      }
+      refresh();
+    });
+    document.addEventListener('input', function (event) { if (event.target.matches('[data-min], [data-sec]')) refresh(); });
+    refresh();
+  })();
+</script>
+{% endblock %}

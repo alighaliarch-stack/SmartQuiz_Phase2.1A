@@ -12,6 +12,21 @@
   </div>
   {% endif %}
 
+  {% if error_message %}
+  <div class="alert alert-danger d-flex align-items-center gap-2 mb-4" role="alert" data-builder-error
+       style="background: rgba(229,52,42,0.14); border: 1px solid rgba(229,52,42,0.4); color: var(--sq-rose-hi); border-radius: 12px;">
+    <i class="bi bi-exclamation-octagon-fill"></i>
+    <span>{{ error_message }}</span>
+  </div>
+  {% endif %}
+  {% if time_limit_error %}
+  <div class="alert alert-warning mb-4" role="alert" data-time-limit-warning
+       style="background: rgba(255,176,32,0.12); border: 1px solid rgba(255,176,32,0.45); color: var(--sq-amber); border-radius: 12px;">
+    <i class="bi bi-hourglass-bottom me-1"></i>{{ time_limit_error }}
+    This quiz cannot be published until the total is {{ max_total|minsec }} or less.
+  </div>
+  {% endif %}
+
   <!-- ============================ QUIZ SUMMARY ============================ -->
   <div class="sq-card p-4 p-md-4 mb-4">
     <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
@@ -29,7 +44,7 @@
           <span class="fw-semibold">{{ questions|length }}</span>
           <span class="sq-note">question{{ '' if questions|length == 1 else 's' }}</span>
           <span class="sq-note">·</span>
-          <span class="sq-note"><i class="bi bi-hourglass-split me-1"></i>{{ quiz.duration_minutes }} min</span>
+          <span class="sq-note" data-total-time="{{ total_seconds }}"><i class="bi bi-hourglass-split me-1"></i>Total question time {{ total_seconds|minsec }}{% if time_limit %} (limit {{ time_limit|minsec }}){% endif %}</span>
           <span class="sq-note">·</span>
           <span class="sq-note"><i class="bi bi-check2-square me-1"></i>{{ quiz.passing_percentage }}% to pass</span>
         </div>
@@ -94,6 +109,11 @@
                 {% endif %}
                 <span class="fw-semibold">{{ q.question_text[:70] }}{{ "…" if q.question_text|length > 70 else "" }}</span>
               </div>
+              {% if q.question_bank_id %}
+              <div class="sq-note small" data-bank-provenance="{{ q.bank_question_id }}">
+                From question bank <a href="/admin/question-banks/{{ q.question_bank_id }}">{{ q.question_bank.title if q.question_bank else "#" ~ q.question_bank_id }}</a>{% if q.question_bank %} v{{ q.question_bank.version_number }}{% endif %}{% if q.source_reference %} · {{ q.source_reference }}{% endif %}
+              </div>
+              {% endif %}
               {% if q.source_document_id %}
               <div class="sq-note small" data-provenance="{{ q.generated_question_id }}">
                 Generated from <a href="/admin/learning/documents/{{ q.source_document_id }}">{{ q.source_document.title if q.source_document else "document #" ~ q.source_document_id }}</a>{% if q.source_document_version %} v{{ q.source_document_version.version_number }}{% endif %}{% if q.source_reference %} · {{ q.source_reference }}{% endif %}
@@ -103,7 +123,7 @@
             <td><span class="sq-note">{{ question_type_labels.get(q.question_type, q.question_type) }}</span></td>
             <td>{{ q.points }}</td>
             <td class="sq-note">
-              <i class="bi bi-hourglass-split me-1"></i>{{ "%d min"|format(q.duration_seconds // 60) if q.duration_seconds % 60 == 0 and q.duration_seconds >= 60 else "%d sec"|format(q.duration_seconds) }}
+              <i class="bi bi-hourglass-split me-1"></i>{{ q.duration_seconds|minsec }}
             </td>
             <td class="text-end">
               <a href="/admin/quizzes/{{ quiz.id }}/questions/{{ q.id }}/edit" class="btn-sq-icon" title="Edit"><i class="bi bi-pencil"></i></a>

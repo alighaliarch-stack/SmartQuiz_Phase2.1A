@@ -18,3 +18,7 @@ smartquiz.db
 smartquiz.pre-learning-backup-*.db
 static/uploads/*
 !static/uploads/.gitkeep
+
+# Uploaded teaching and question documents (never commit)
+storage/learning/
+storage/question_banks/

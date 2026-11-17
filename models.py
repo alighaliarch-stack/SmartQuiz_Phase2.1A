@@ -88,6 +88,12 @@ class Quiz(Base):
     status = Column(String(20), default="Draft", nullable=False)
     auto_advance = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    # Maximum total of all question timers, in seconds, checked when the quiz
+    # is published or a session is started. Quizzes created through the app
+    # get 600 (10 minutes). NULL = created before this rule existed: such a
+    # quiz keeps its original behaviour (no cap unless it contains
+    # question-bank questions, which were always capped at 600).
+    time_limit_seconds = Column(Integer, nullable=True)
 
     questions = relationship(
         "Question",
@@ -155,10 +161,19 @@ class Question(Base):
     source_reference = Column(String(255), nullable=True)
     source_passage_id = Column(String(40), nullable=True)
 
+    # Phase 4 provenance. Set only when the question was copied into this
+    # quiz from a teacher-uploaded question bank. The quiz question is an
+    # independent snapshot: editing, replacing or deleting the bank entry
+    # never changes it. NULL for every other question.
+    bank_question_id = Column(Integer, ForeignKey("bank_questions.id"), nullable=True, index=True)
+    question_bank_id = Column(Integer, ForeignKey("question_banks.id"), nullable=True, index=True)
+
     quiz = relationship("Quiz", back_populates="questions")
     generated_question = relationship("GeneratedQuestion")
     source_document = relationship("Document")
     source_document_version = relationship("DocumentVersion")
+    bank_question = relationship("BankQuestion")
+    question_bank = relationship("QuestionBank")
 
 
 class StudentAccount(Base):
@@ -178,6 +193,12 @@ class StudentAccount(Base):
     locked_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    # Phase 4A. An account with history is never removed: deletion sets
+    # deleted_at (it can be restored) and, optionally, anonymized_at, which
+    # replaces the account's personal details. Quiz participation rows keep
+    # the name/roll number students typed when they joined.
+    deleted_at = Column(DateTime, nullable=True)
+    anonymized_at = Column(DateTime, nullable=True)
 
     quiz_participations = relationship("Student", back_populates="account")
     enrollments = relationship(
@@ -383,6 +404,8 @@ class Document(Base):
     extraction_error = Column(Text, nullable=True)
     extracted_text = Column(Text, nullable=True)
     is_archived = Column(Boolean, default=False, nullable=False)
+    # Phase 4A: "Recently deleted". The file, versions and provenance stay.
+    deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -489,6 +512,9 @@ class Flashcard(Base):
     published_at = Column(DateTime, nullable=True)
     archived_at = Column(DateTime, nullable=True)
     deleted_at = Column(DateTime, nullable=True)
+    # Phase 4A: token of the form submission that created this batch, so a
+    # repeated submission is recognised instead of saving the batch twice.
+    generation_request_id = Column(String(64), nullable=True, index=True)
 
     module = relationship("LearningModule", back_populates="flashcards")
     course = relationship("Course")
@@ -526,6 +552,7 @@ class GeneratedQuestion(Base):
     published_at = Column(DateTime, nullable=True)
     archived_at = Column(DateTime, nullable=True)
     deleted_at = Column(DateTime, nullable=True)
+    generation_request_id = Column(String(64), nullable=True, index=True)  # Phase 4A, see Flashcard
 
     module = relationship("LearningModule", back_populates="generated_questions")
     course = relationship("Course")
@@ -739,6 +766,110 @@ class Response(Base):
     question_options_snapshot = Column(Text, nullable=True)       # JSON-encoded
     correct_answer_snapshot = Column(Text, nullable=True)         # JSON-encoded
     question_points_snapshot = Column(Integer, nullable=True)
+
+
+class QuestionBank(Base):
+    """One teacher-uploaded question document (Phase 4), imported as an
+    independent, reusable bank of teacher-authored questions.
+
+    Each upload is its own bank; banks are never merged. Replacing a bank
+    creates a NEW row in the same lineage (``lineage_id``) with
+    ``version_number + 1`` and ``supersedes_id`` pointing at the version it
+    replaces. The old version is kept read-only (``is_current = False``) so
+    quiz questions copied from it keep a valid provenance link.
+
+    status:
+      DRAFT   uploaded and extracted; the teacher has not confirmed the
+              import preview yet. Never usable for quiz assembly.
+      ACTIVE  import confirmed.
+    """
+
+    __tablename__ = "question_banks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, default="", nullable=False)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)
+    module_id = Column(Integer, ForeignKey("learning_modules.id"), nullable=True, index=True)
+    source_filename = Column(String(255), nullable=False)       # the teacher's original filename
+    storage_filename = Column(String(255), nullable=False, unique=True)
+    file_extension = Column(String(20), nullable=False)
+    mime_type = Column(String(100), nullable=False)
+    file_size_bytes = Column(Integer, default=0, nullable=False)
+    sha256 = Column(String(128), nullable=False, index=True)
+    status = Column(String(20), default="DRAFT", nullable=False)
+    lineage_id = Column(Integer, nullable=True, index=True)
+    version_number = Column(Integer, default=1, nullable=False)
+    supersedes_id = Column(Integer, ForeignKey("question_banks.id"), nullable=True)
+    is_current = Column(Boolean, default=False, nullable=False)
+    # Teacher-only extraction evidence: JSON list of {id, label, kind, text}
+    # source passages (for "compare with the original"), and JSON lists of
+    # bank-level warnings and preamble lines that were not part of a question.
+    source_passages = Column(Text, default="[]", nullable=False)
+    import_warnings = Column(Text, default="[]", nullable=False)
+    preamble = Column(Text, default="[]", nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)  # uploaded at
+    confirmed_at = Column(DateTime, nullable=True)
+    superseded_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
+
+    course = relationship("Course")
+    module = relationship("LearningModule")
+    questions = relationship(
+        "BankQuestion",
+        back_populates="bank",
+        cascade="all, delete-orphan",
+        order_by="BankQuestion.position",
+    )
+
+
+class BankQuestion(Base):
+    """A teacher-authored question extracted from a QuestionBank document.
+
+    ``options``/``correct_answer`` use exactly the same JSON shapes as
+    ``Question`` (correct answers are stored as option TEXT, so changing
+    option order can never change which answer is correct).
+    ``option_labels`` keeps the document's own labels (A, B, C, D ...).
+    ``original_snapshot`` is the extraction exactly as first read from the
+    document and is never modified, so the teacher can always compare an
+    edited question with what the document actually said.
+
+    status: READY (complete and usable in quizzes) | NEEDS_REVIEW
+    (incomplete, invalid or flagged as uncertain) | EXCLUDED (teacher
+    excluded it from the bank).
+
+    Answer keys, explanations and marking guidance live only here and on
+    teacher pages; they are never sent to students.
+    """
+
+    __tablename__ = "bank_questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    question_bank_id = Column(Integer, ForeignKey("question_banks.id"), nullable=False, index=True)
+    position = Column(Integer, default=0, nullable=False)
+    question_number = Column(String(20), nullable=True)   # as numbered in the document
+    question_text = Column(Text, nullable=False)
+    question_type = Column(String(20), default="mcq_single", nullable=False)
+    options = Column(Text, default="[]", nullable=False)          # JSON list of option texts
+    option_labels = Column(Text, default="[]", nullable=False)    # JSON list of document labels
+    correct_answer = Column(Text, default="null", nullable=False)  # JSON, same shape as Question
+    answer_key_raw = Column(Text, nullable=True)                   # the answer exactly as the key states it
+    explanation = Column(Text, default="", nullable=False)
+    marking_guidance = Column(Text, default="", nullable=False)
+    source_reference = Column(String(255), default="", nullable=False)
+    source_passage_id = Column(String(40), nullable=True)
+    source_passage_ids = Column(Text, default="[]", nullable=False)
+    answer_passage_ids = Column(Text, default="[]", nullable=False)
+    warnings = Column(Text, default="[]", nullable=False)
+    status = Column(String(20), default="NEEDS_REVIEW", nullable=False)
+    teacher_reviewed = Column(Boolean, default=False, nullable=False)
+    original_snapshot = Column(Text, default="{}", nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    deleted_at = Column(DateTime, nullable=True)
+
+    bank = relationship("QuestionBank", back_populates="questions")
 
 
 class AppSetting(Base):

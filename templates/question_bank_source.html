@@ -1,0 +1,28 @@
+{% extends "dashboard_base.html" %}
+{% block title %}Original document · {{ bank.title }} · {{ app_name }}{% endblock %}
+{% block page_title %}Original Document{% endblock %}
+
+{% block content %}
+<a href="/admin/question-banks/{{ bank.id }}" class="sq-note"><i class="bi bi-arrow-left me-1"></i>{{ bank.title }}</a>
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-2 mb-3">
+  <div>
+    <h1 class="h4 mb-1">{{ bank.source_filename }}</h1>
+    <p class="sq-note mb-0">Text exactly as extracted from the uploaded file, in reading order, with the citation used for each question.</p>
+  </div>
+  <a class="btn btn-sm btn-sq btn-sq-outline" href="/admin/question-banks/{{ bank.id }}/file"><i class="bi bi-download me-1"></i>Download original</a>
+</div>
+<div class="sq-card p-3">
+  {% for passage in passages %}
+  {% set users = [] %}
+  {% for pid in [passage.id] + (passage.cell_ids or []) %}{% for label in used_ids.get(pid, []) %}{% if label not in users %}{% set _ = users.append(label) %}{% endif %}{% endfor %}{% endfor %}
+  <div class="d-flex gap-3 py-2" style="border-bottom: 1px solid rgba(255,255,255,0.06);" data-passage="{{ passage.id }}">
+    <div class="sq-note" style="min-width: 7rem;">{{ passage.label }}{% if users %}<br><span style="color: var(--sq-primary-hi);">{{ users|join(", ") }}</span>{% endif %}</div>
+    {% if passage.kind == "table_row" %}
+    <div class="d-flex flex-wrap gap-3" dir="auto">{% for cell in passage.cells %}<span style="white-space: pre-wrap; min-width: 3rem;">{{ cell }}</span>{% endfor %}</div>
+    {% else %}
+    <div style="white-space: pre-wrap;" dir="auto">{{ passage.text }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -38,9 +38,9 @@
     <div class="col-md-3"><label class="form-label small" for="filter-document">Source document</label>
       <select id="filter-document" class="form-select form-select-sm" name="document_id">
         <option value="">Any document</option>
-        {% for document in documents %}<option value="{{ document.id }}" {% if filters.document_id == document.id %}selected{% endif %}>{{ document.title }}</option>{% endfor %}
+        {% for document in documents %}{% set unavailable = document_unavailable_reason(document) %}<option value="{{ document.id }}" {% if filters.document_id == document.id %}selected{% endif %}>{{ document.title }}{% if unavailable %} ({{ unavailable }}){% endif %}</option>{% endfor %}
       </select></div>
-    <div class="col-md-3"><label class="form-label small" for="filter-q">Search text</label><input id="filter-q" class="form-control form-control-sm" name="q" value="{{ filters.q }}"></div>
+    <div class="col-md-3"><label class="form-label small" for="filter-q">Search text</label><input id="filter-q" class="form-control form-control-sm" type="search" name="q" value="{{ filters.q }}" autocomplete="off" data-clear-search></div>
     <div class="col-md-1"><button class="btn btn-sm btn-sq btn-sq-primary w-100" type="submit">Filter</button></div>
   </form>
 
@@ -66,7 +66,7 @@
     {% endif %}
     <p class="small text-secondary mb-2">
       Source:
-      {% if row.document %}<a href="/admin/learning/documents/{{ row.document.id }}">{{ row.document.title }}</a>{% if row.version_number %} v{{ row.version_number }}{% endif %}{% if row.document.is_archived %} (archived document){% endif %}{% else %}no source document{% endif %}
+      {% if row.document %}<a href="/admin/learning/documents/{{ row.document.id }}">{{ row.document.title }}</a>{% if row.version_number %} v{{ row.version_number }}{% endif %}{% set unavailable = document_unavailable_reason(row.document) %}{% if unavailable %} <span class="badge text-bg-secondary" data-source-unavailable>source {{ unavailable }}</span>{% endif %}{% else %}no source document{% endif %}
       {% if item.source_reference %} · {{ item.source_reference }}{% endif %}
       · Course: {% if item.course %}{{ item.course.name }} › {{ item.module.title }}{% else %}not assigned{% endif %}
     </p>
